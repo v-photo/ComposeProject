@@ -355,7 +355,9 @@ def run_mode1(args):
             space_dims=field_info['space_dims'],
             world_bounds=field_info['world_bounds'],
             kriging_params={'variogram_model': args.variogram_model},
-            epochs=args.pinn_epochs
+            epochs=args.pinn_epochs,
+            max_training_points=1000,  # 限制最大训练点数避免内存问题
+            network_config={'layers': [3, 32, 32, 32, 1]}  # 使用安全的网络配置
         )
         
         execution_time = time.time() - start_time
@@ -627,7 +629,7 @@ def create_argument_parser():
     parser.add_argument('--quiet', dest='verbose', action='store_false', help='简洁输出')
     
     # PINN参数
-    parser.add_argument('--pinn_epochs', type=int, default=2000, help='PINN训练轮数 (默认: 2000)')
+    parser.add_argument('--pinn_epochs', type=int, default=500, help='PINN训练轮数 (默认: 500)')
     
     # Kriging参数
     parser.add_argument('--variogram_model', choices=['linear', 'exponential', 'gaussian'], 

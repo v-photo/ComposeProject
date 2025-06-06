@@ -90,7 +90,7 @@ class ComposeConfig:
     kriging_enable_uncertainty: bool = True  # 注意：当前实现可能不完全支持
     
     # PINN配置 PINN settings
-    pinn_epochs: int = 5000
+    pinn_epochs: int = 1000  # 减少默认训练轮数，避免长时间等待
     pinn_learning_rate: float = 1e-3
     pinn_network_layers: List[int] = None
     
@@ -101,7 +101,8 @@ class ComposeConfig:
     
     def __post_init__(self):
         if self.pinn_network_layers is None:
-            self.pinn_network_layers = [50, 50, 50, 50]
+            # 正确的网络配置：[输入层(3), 隐藏层..., 输出层(1)]
+            self.pinn_network_layers = [3, 32, 32, 32, 1]
 
 # ==================== 通用工具 (Common Tools) ====================
 
@@ -616,12 +617,21 @@ class PINNAdapter:
         # 创建PINN训练器
         self.trainer = PINNTrainer()
         
+        # 数据量控制 - 避免内存溢出
+        max_training_points = kwargs.get('max_training_points', 1000)
+        if len(X) > max_training_points:
+            if self.config.verbose:
+                print(f"⚠️ 训练数据量过大 ({len(X)} 点)，随机采样到 {max_training_points} 点")
+            indices = np.random.choice(len(X), max_training_points, replace=False)
+            X = X[indices]
+            y = y[indices]
+        
         # 转换输入数据格式
         sampled_log_doses = np.log(y + EPSILON)
         
-        # 创建PINN模型
+        # 创建PINN模型 - 使用更小的网络
         network_config = kwargs.get('network_config', {
-            'layers': self.config.pinn_network_layers,
+            'layers': [3, 20, 20, 20, 1],  # 更小的网络避免内存问题
             'activation': 'tanh'
         })
         
