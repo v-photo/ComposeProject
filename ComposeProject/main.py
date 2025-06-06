@@ -185,6 +185,9 @@ def load_real_data_from_excel(data_file_path: str = "../PINN/DATA.xlsx") -> tupl
         sampling_strategy='positive_only'
     )
     
+    # 计算测试网格形状（用于可视化）
+    test_grid_shape = (20, 15, 15)  # 创建一个适中的测试网格
+    
     # 字段信息
     field_info = {
         'space_dims': dose_data['space_dims'].tolist(),
@@ -193,6 +196,7 @@ def load_real_data_from_excel(data_file_path: str = "../PINN/DATA.xlsx") -> tupl
             'max': dose_data['world_max']
         },
         'grid_shape': dose_data['grid_shape'],
+        'test_grid_shape': test_grid_shape,  # 添加测试网格形状
         'dose_data': dose_data,  # 保存完整的dose_data供后续使用
         'data_source': 'real_excel_data'
     }
@@ -272,14 +276,35 @@ def run_common_mode(args):
     # 可视化演示
     print("\n6️⃣ 可视化功能演示...")
     
-    # 转换为3D网格用于可视化
+    # 为可视化创建规则网格数据
     test_grid_shape = field_info['test_grid_shape']
-    true_grid = test_values.reshape(test_grid_shape)
-    pred_grid = test_values.reshape(test_grid_shape) * (1 + np.random.normal(0, 0.05, test_grid_shape))
+    
+    # 检查数据源并相应处理
+    if field_info.get('data_source') == 'real_excel_data':
+        # 对于真实数据，创建规则网格用于可视化
+        world_bounds = field_info['world_bounds']
+        x_test = np.linspace(world_bounds['min'][0], world_bounds['max'][0], test_grid_shape[0])
+        y_test = np.linspace(world_bounds['min'][1], world_bounds['max'][1], test_grid_shape[1])
+        z_test = np.linspace(world_bounds['min'][2], world_bounds['max'][2], test_grid_shape[2])
+        
+        X, Y, Z = np.meshgrid(x_test, y_test, z_test, indexing='ij')
+        grid_points = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1)
+        
+        # 使用简单的插值创建网格值（这里用距离倒数加权）
+        from scipy.spatial.distance import cdist
+        distances = cdist(grid_points, train_points)
+        weights = 1.0 / (distances + 1e-8)  # 避免除零
+        weights /= weights.sum(axis=1, keepdims=True)  # 归一化权重
+        true_grid_values = (weights @ train_values).reshape(test_grid_shape)
+        pred_grid_values = true_grid_values * (1 + np.random.normal(0, 0.05, test_grid_shape))
+    else:
+        # 对于合成数据，直接使用测试值
+        true_grid_values = test_values.reshape(test_grid_shape)
+        pred_grid_values = test_values.reshape(test_grid_shape) * (1 + np.random.normal(0, 0.05, test_grid_shape))
     
     # 绘制对比图
     fig = VisualizationTools.plot_comparison_2d_slice(
-        true_grid, pred_grid, slice_axis=2, slice_idx=test_grid_shape[2]//2,
+        true_grid_values, pred_grid_values, slice_axis=2, slice_idx=test_grid_shape[2]//2,
         title_prefix="演示数据 - "
     )
     
@@ -356,8 +381,8 @@ def run_mode1(args):
             world_bounds=field_info['world_bounds'],
             kriging_params={'variogram_model': args.variogram_model},
             epochs=args.pinn_epochs,
-            max_training_points=1000,  # 限制最大训练点数避免内存问题
-            network_config={'layers': [3, 32, 32, 32, 1]}  # 使用安全的网络配置
+            max_training_points=200,  # 大幅减少训练点数避免CUDA内存问题
+            network_config={'layers': [3, 16, 16, 1], 'activation': 'tanh'}  # 使用更小的网络避免CUDA内存问题
         )
         
         execution_time = time.time() - start_time

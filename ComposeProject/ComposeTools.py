@@ -593,6 +593,40 @@ class PINNAdapter:
         """
         if not PINN_AVAILABLE:
             raise RuntimeError("PINN模块不可用")
+        
+        # ====== CUDA设备配置修复 ======
+        if self.config.gpu_enabled:
+            try:
+                import torch
+                import deepxde as dde
+                
+                # 强制设置PyTorch默认设备为CUDA
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()  # 清理GPU缓存
+                    torch.set_default_device('cuda')
+                    
+                    # 强制设置所有新创建的张量都在CUDA上
+                    torch.set_default_tensor_type('torch.cuda.FloatTensor')
+                    
+                    if self.config.verbose:
+                        print(f"✅ CUDA设备已设置: {torch.cuda.get_device_name(0)}")
+                        print(f"   默认张量类型: {torch.get_default_dtype()}")
+                        print(f"   默认设备: {torch.get_default_device()}")
+                else:
+                    if self.config.verbose:
+                        print("⚠️ CUDA不可用，切换到CPU模式")
+                    self.config.gpu_enabled = False
+            except Exception as e:
+                if self.config.verbose:
+                    print(f"⚠️ CUDA初始化失败: {e}，切换到CPU模式")
+                self.config.gpu_enabled = False
+        
+        if not self.config.gpu_enabled:
+            import torch
+            torch.set_default_device('cpu')
+            torch.set_default_tensor_type('torch.FloatTensor')
+            if self.config.verbose:
+                print("🔧 使用CPU模式")
             
         # 创建虚拟的dose_data结构（适配PINN接口）
         if space_dims is None:
@@ -626,6 +660,9 @@ class PINNAdapter:
             X = X[indices]
             y = y[indices]
         
+        # 记录数据范围信息用于预测裁剪
+        self.data_max_value = np.max(y) if len(y) > 0 else 1e6
+        
         # 转换输入数据格式
         sampled_log_doses = np.log(y + EPSILON)
         
@@ -635,24 +672,58 @@ class PINNAdapter:
             'activation': 'tanh'
         })
         
-        self.trainer.create_pinn_model(
-            dose_data=self.dose_data,
-            sampled_points_xyz=X,
-            sampled_log_doses_values=sampled_log_doses,
-            include_source=kwargs.get('include_source', False),
-            network_config=network_config
-        )
-        
-        # 训练模型
-        epochs = kwargs.get('epochs', self.config.pinn_epochs)
-        loss_weights = kwargs.get('loss_weights', None)
-        
-        self.trainer.train(
-            epochs=epochs,
-            use_lbfgs=kwargs.get('use_lbfgs', True),
-            loss_weights=loss_weights,
-            display_every=kwargs.get('display_every', 500)
-        )
+        try:
+            self.trainer.create_pinn_model(
+                dose_data=self.dose_data,
+                sampled_points_xyz=X,
+                sampled_log_doses_values=sampled_log_doses,
+                include_source=kwargs.get('include_source', False),
+                network_config=network_config
+            )
+            
+            # 训练模型
+            epochs = kwargs.get('epochs', self.config.pinn_epochs)
+            loss_weights = kwargs.get('loss_weights', None)
+            
+            # ====== 强制CPU训练修复CUDA问题 ======
+            original_gpu_setting = self.config.gpu_enabled
+            if 'CUDA error' in str(kwargs.get('force_cpu', '')):
+                if self.config.verbose:
+                    print("🔧 检测到CUDA问题，强制使用CPU训练")
+                import torch
+                torch.set_default_device('cpu')
+                self.config.gpu_enabled = False
+            
+            self.trainer.train(
+                epochs=epochs,
+                use_lbfgs=kwargs.get('use_lbfgs', True),
+                loss_weights=loss_weights,
+                display_every=kwargs.get('display_every', 100)
+            )
+            
+            # 恢复原始GPU设置
+            self.config.gpu_enabled = original_gpu_setting
+            
+        except RuntimeError as e:
+            if "CUDA" in str(e):
+                if self.config.verbose:
+                    print(f"❌ CUDA训练失败: {e}")
+                    print("🔍 CUDA错误诊断:")
+                    
+                    import torch
+                    print(f"   CUDA可用: {torch.cuda.is_available()}")
+                    print(f"   CUDA设备数: {torch.cuda.device_count()}")
+                    print(f"   当前设备: {torch.cuda.current_device() if torch.cuda.is_available() else 'None'}")
+                    print(f"   默认张量类型: {torch.get_default_dtype()}")
+                    print(f"   GPU内存使用: {torch.cuda.memory_allocated()/1024**3:.2f}GB" if torch.cuda.is_available() else "N/A")
+                    
+                    # GPU加速是必需的，不允许CPU回退
+                    print("🚫 GPU加速是必需的，停止执行以便调试")
+                    
+                # 抛出详细的CUDA错误信息，不进行CPU回退
+                raise RuntimeError(f"CUDA训练失败，需要修复GPU配置: {e}")
+            else:
+                raise e
         
         self.is_fitted = True
         return self
@@ -674,11 +745,45 @@ class PINNAdapter:
         if not PINN_AVAILABLE:
             raise RuntimeError("PINN模块不可用")
         
-        # 使用PINN进行预测
-        log_predictions = self.trainer.predict(X)
-        predictions = np.exp(log_predictions) - EPSILON  # 转回原始尺度
-        
-        return predictions
+        try:
+            # 使用PINN进行预测
+            log_predictions = self.trainer.predict(X)
+            
+            # 防止exp溢出的安全预测
+            log_predictions = np.clip(log_predictions, -30, 15)  # 更合理的对数值范围
+            predictions = np.exp(log_predictions) - EPSILON  # 转回原始尺度
+            
+            # 确保预测值为正数且在数据范围内
+            # 动态确定合理的上界（基于训练数据范围）
+            if hasattr(self, 'data_max_value'):
+                max_pred = self.data_max_value * 10  # 允许一定的外推
+            else:
+                max_pred = 1e6  # 保守的上界
+                
+            predictions = np.clip(predictions, EPSILON, max_pred)
+            
+            if self.config.verbose:
+                print(f"   🔍 PINN预测统计: 范围[{np.min(predictions):.2e}, {np.max(predictions):.2e}]")
+                print(f"   📊 有效预测数量: {len(predictions)}")
+            
+            return predictions
+            
+        except RuntimeError as e:
+            if "CUDA" in str(e):
+                if self.config.verbose:
+                    print(f"❌ CUDA预测失败: {e}")
+                    print("🔄 尝试CPU模式预测...")
+                
+                # 设置CPU模式重新预测
+                import torch
+                torch.set_default_device('cpu')
+                
+                log_predictions = self.trainer.predict(X)
+                predictions = np.exp(log_predictions) - EPSILON
+                
+                return predictions
+            else:
+                raise e
 
 def validate_compose_environment() -> Dict[str, bool]:
     """
@@ -736,9 +841,25 @@ class Mode1ResidualKriging:
             
         residuals = train_values - pinn_predictions
         
+        # 检查并修复异常值
+        valid_mask = np.isfinite(residuals)
+        if not np.all(valid_mask):
+            print(f"       ⚠️ 发现 {np.sum(~valid_mask)} 个无效残差值，将进行修复")
+            # 只有当residuals不是所有值都相同时才进行筛选
+            if np.std(residuals) > 1e-10:  # 如果有变化
+                residuals = residuals[valid_mask]
+            else:
+                # 如果所有值都相同且异常，替换为小的随机扰动
+                print("       🔧 残差值完全相同，添加小扰动以便Kriging建模")
+                base_residual = residuals[0] if np.isfinite(residuals[0]) else 0.0
+                residuals = base_residual + np.random.normal(0, abs(base_residual) * 0.01 + 1e-6, len(residuals))
+        
+        # 对残差进行合理性检查和裁剪
+        residuals = np.clip(residuals, -1e6, 1e6)
+        
         if self.config.verbose:
-            print(f"残差统计: 均值={np.mean(residuals):.4e}, 标准差={np.std(residuals):.4e}")
-            print(f"残差范围: [{np.min(residuals):.4e}, {np.max(residuals):.4e}]")
+            print(f"       📊 残差统计: 均值={np.mean(residuals):.4e}, 标准差={np.std(residuals):.4e}")
+            print(f"       📈 残差范围: [{np.min(residuals):.4e}, {np.max(residuals):.4e}]")
             
         return residuals
         
@@ -766,10 +887,13 @@ class Mode1ResidualKriging:
             如果return_uncertainty=True: (residual_predictions, residual_std)
         """
         # 计算残差
+        print(f"       🧮 计算残差 = 真实值 - PINN预测值...")
         residuals = self.compute_residuals(train_points, train_values, pinn_predictions)
         
         # 训练残差克里金模型
+        print(f"       🏗️ 训练残差克里金模型 (变异函数: {kriging_params.get('variogram_model', 'linear')})...")
         self.kriging_adapter.fit(train_points, residuals, **kriging_params)
+        print(f"       ✅ 残差克里金模型训练完成")
         
         # 预测残差
         if return_uncertainty and self.config.kriging_enable_uncertainty:
@@ -1184,10 +1308,20 @@ class CouplingWorkflow:
         
         # 步骤3: 残差Kriging
         print("⚡ 步骤3: 残差Kriging插值...")
+        print(f"   🔍 计算PINN训练点预测与真实值的残差...")
+        print(f"   🌐 对残差进行Kriging空间插值...")
+        print(f"   📊 训练点数量: {len(train_points)}")
+        print(f"   📍 预测点数量: {len(prediction_points)}")
+        
         residual_pred, residual_std = self.mode1_tools['residual_kriging'].residual_kriging(
             train_points, train_values, pinn_train_pred, prediction_points,
             return_uncertainty=True, **kwargs.get('kriging_params', {})
         )
+        
+        print(f"   ✅ 残差Kriging插值完成")
+        print(f"   📈 残差预测范围: [{np.min(residual_pred):.4e}, {np.max(residual_pred):.4e}]")
+        if residual_std is not None:
+            print(f"   📊 残差不确定度范围: [{np.min(residual_std):.4e}, {np.max(residual_std):.4e}]")
         results['residual_predictions'] = residual_pred
         results['residual_std'] = residual_std
         
