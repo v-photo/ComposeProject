@@ -220,15 +220,16 @@ def run_common_mode(args):
     print("\n1️⃣ 环境完整性检查...")
     env_status = validate_compose_environment()
     
-    # 加载数据
+    # 加载数据 - 默认使用真实数据
     print("\n2️⃣ 加载数据...")
-    if args.use_real_data:
+    try:
         print("使用真实DATA.xlsx数据")
         train_points, train_values, test_points, test_values, field_info = load_real_data_from_excel(
             data_file_path=args.data_file
         )
-    else:
-        print("生成合成演示数据")
+    except Exception as e:
+        print(f"⚠️ 真实数据加载失败: {e}")
+        print("回退到合成演示数据")
         train_points, train_values, test_points, test_values, field_info = generate_synthetic_3d_data(
             n_samples=args.num_samples,
             noise_level=args.noise_level,
@@ -609,8 +610,10 @@ def create_argument_parser():
     )
     
     # 数据源选择
-    parser.add_argument('--use_real_data', action='store_true', default=False, 
+    parser.add_argument('--use_real_data', action='store_true', default=True, 
                        help='使用真实DATA.xlsx数据而非合成数据')
+    parser.add_argument('--use_synthetic_data', action='store_true', default=False,
+                       help='使用合成数据而非真实数据')
     parser.add_argument('--data_file', type=str, default="../PINN/DATA.xlsx",
                        help='数据文件路径 (默认: ../PINN/DATA.xlsx)')
     
