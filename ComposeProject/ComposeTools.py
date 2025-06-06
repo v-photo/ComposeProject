@@ -60,9 +60,12 @@ except ImportError as e:
 try:
     # 导入PINN模块
     from tools import (SimulationConfig, RadiationDataProcessor, DataLoader, 
-                      PINNTrainer, ResultAnalyzer, Visualizer)
+                      PINNTrainer, ResultAnalyzer, Visualizer, setup_deepxde_backend)
+    # 立即设置DeepXDE后端
+    setup_deepxde_backend()
     PINN_AVAILABLE = True
     print("✅ PINN模块导入成功")
+    print("✅ DeepXDE后端已设置为PyTorch")
 except ImportError as e:
     PINN_AVAILABLE = False
     warnings.warn(f"PINN模块导入失败: {e}")
@@ -89,10 +92,13 @@ class ComposeConfig:
     kriging_block_size: int = 10000
     kriging_enable_uncertainty: bool = True  # 注意：当前实现可能不完全支持
     
-    # PINN配置 PINN settings
-    pinn_epochs: int = 1000  # 减少默认训练轮数，避免长时间等待
+    # PINN配置 PINN settings (对齐PINN子项目配置)
+    pinn_epochs: int = 10000  # 与PINN子项目对齐：10000轮训练
     pinn_learning_rate: float = 1e-3
     pinn_network_layers: List[int] = None
+    pinn_use_lbfgs: bool = True  # 启用L-BFGS，与PINN子项目对齐
+    pinn_loss_weights: List[float] = None  # loss权重，与PINN子项目对齐
+    pinn_sampling_strategy: str = 'positive_only'  # 采样策略，与PINN子项目对齐
     
     # 耦合配置 Coupling settings
     fusion_weight: float = 0.5  # 方案1中的权重ω
@@ -101,8 +107,12 @@ class ComposeConfig:
     
     def __post_init__(self):
         if self.pinn_network_layers is None:
-            # 正确的网络配置：[输入层(3), 隐藏层..., 输出层(1)]
-            self.pinn_network_layers = [3, 32, 32, 32, 1]
+            # 与PINN子项目对齐：使用无源PINN的网络配置 [3, 32, 32, 32, 32, 1]
+            self.pinn_network_layers = [3, 32, 32, 32, 32, 1]
+        
+        if self.pinn_loss_weights is None:
+            # 与PINN子项目对齐：使用无源PINN的loss权重 [1, 100]
+            self.pinn_loss_weights = [1, 100]
 
 # ==================== 通用工具 (Common Tools) ====================
 
@@ -403,49 +413,194 @@ class VisualizationTools:
                              coordinates: Optional[np.ndarray] = None,
                              save_path: Optional[str] = None) -> plt.Figure:
         """
-        绘制残差分析图
-        Plot residual analysis
+        残差分析可视化
+        Residual analysis visualization
         """
-        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
         
-        # 残差直方图
-        axes[0, 0].hist(residuals, bins=50, alpha=0.7, edgecolor='black')
-        axes[0, 0].set_title('残差分布直方图')
+        # 1. 残差直方图
+        axes[0, 0].hist(residuals, bins=50, alpha=0.7, color='skyblue', edgecolor='black')
+        axes[0, 0].axvline(np.mean(residuals), color='red', linestyle='--', label=f'均值: {np.mean(residuals):.2e}')
+        axes[0, 0].axvline(np.median(residuals), color='orange', linestyle='--', label=f'中位数: {np.median(residuals):.2e}')
         axes[0, 0].set_xlabel('残差值')
-        axes[0, 0].set_ylabel('频数')
+        axes[0, 0].set_ylabel('频率')
+        axes[0, 0].set_title('残差分布直方图')
+        axes[0, 0].legend()
         axes[0, 0].grid(True, alpha=0.3)
         
-        # Q-Q图检验正态性
+        # 2. Q-Q图
         from scipy import stats
         stats.probplot(residuals, dist="norm", plot=axes[0, 1])
-        axes[0, 1].set_title('残差正态性Q-Q图')
+        axes[0, 1].set_title('残差Q-Q图 (正态性检验)')
         axes[0, 1].grid(True, alpha=0.3)
         
-        # 残差vs索引（时间序列图）
-        axes[1, 0].plot(residuals, alpha=0.7)
-        axes[1, 0].axhline(y=0, color='red', linestyle='--', alpha=0.7)
-        axes[1, 0].set_title('残差序列图')
-        axes[1, 0].set_xlabel('样本索引')
-        axes[1, 0].set_ylabel('残差值')
+        # 3. 残差绝对值vs预测值（如果有坐标信息）
+        if coordinates is not None and coordinates.shape[0] == len(residuals):
+            # 使用z坐标作为参考
+            z_coords = coordinates[:, 2]
+            scatter = axes[1, 0].scatter(z_coords, np.abs(residuals), alpha=0.6, c=np.abs(residuals), cmap='viridis')
+            axes[1, 0].set_xlabel('Z坐标')
+            axes[1, 0].set_ylabel('残差绝对值')
+            axes[1, 0].set_title('残差绝对值 vs Z坐标')
+            plt.colorbar(scatter, ax=axes[1, 0])
+        else:
+            # 残差绝对值vs索引
+            axes[1, 0].plot(np.abs(residuals), 'o', alpha=0.6, markersize=3)
+            axes[1, 0].set_xlabel('样本索引')
+            axes[1, 0].set_ylabel('残差绝对值')
+            axes[1, 0].set_title('残差绝对值分布')
         axes[1, 0].grid(True, alpha=0.3)
         
-        # 残差的空间分布（如果提供了坐标）
-        if coordinates is not None and coordinates.shape[1] >= 3:
-            scatter = axes[1, 1].scatter(coordinates[:, 0], coordinates[:, 1], 
-                                       c=residuals, cmap='RdBu_r', alpha=0.7)
-            axes[1, 1].set_title('残差空间分布 (X-Y视图)')
-            axes[1, 1].set_xlabel('X坐标')
-            axes[1, 1].set_ylabel('Y坐标')
-            plt.colorbar(scatter, ax=axes[1, 1])
-        else:
-            axes[1, 1].text(0.5, 0.5, '无坐标信息\n无法绘制空间分布', 
-                           ha='center', va='center', transform=axes[1, 1].transAxes)
-            axes[1, 1].set_title('残差空间分布 (不可用)')
+        # 4. 残差统计摘要
+        axes[1, 1].axis('off')
+        stats_text = f"""
+残差统计摘要:
+
+基本统计量:
+• 样本数量: {len(residuals)}
+• 均值: {np.mean(residuals):.4e}
+• 标准差: {np.std(residuals):.4e}
+• 最小值: {np.min(residuals):.4e}
+• 最大值: {np.max(residuals):.4e}
+
+分位数:
+• 25%: {np.percentile(residuals, 25):.4e}
+• 50%: {np.percentile(residuals, 50):.4e}
+• 75%: {np.percentile(residuals, 75):.4e}
+
+质量指标:
+• MAE: {np.mean(np.abs(residuals)):.4e}
+• RMSE: {np.sqrt(np.mean(residuals**2)):.4e}
+• 偏度: {stats.skew(residuals):.4f}
+• 峰度: {stats.kurtosis(residuals):.4f}
+        """
+        axes[1, 1].text(0.05, 0.95, stats_text, transform=axes[1, 1].transAxes, 
+                        fontsize=10, verticalalignment='top', fontfamily='monospace',
+                        bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray", alpha=0.5))
         
         plt.tight_layout()
         
         if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            fig.savefig(save_path, dpi=300, bbox_inches='tight')
+            
+        return fig
+
+    @staticmethod
+    def plot_pinn_error_analysis(train_errors: np.ndarray, 
+                                train_points: np.ndarray,
+                                pinn_predictions: np.ndarray,
+                                true_values: np.ndarray,
+                                save_path: Optional[str] = None) -> plt.Figure:
+        """
+        PINN误差深度分析可视化
+        PINN error deep analysis visualization
+        """
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        
+        # 1. 误差vs真实值散点图
+        axes[0, 0].scatter(true_values, train_errors, alpha=0.6, c='blue', s=20)
+        axes[0, 0].axhline(0, color='red', linestyle='--', linewidth=1)
+        axes[0, 0].set_xlabel('真实值')
+        axes[0, 0].set_ylabel('预测误差')
+        axes[0, 0].set_title('误差 vs 真实值')
+        axes[0, 0].grid(True, alpha=0.3)
+        
+        # 添加趋势线
+        z = np.polyfit(true_values, train_errors, 1)
+        p = np.poly1d(z)
+        axes[0, 0].plot(true_values, p(true_values), "r--", alpha=0.8, linewidth=1)
+        
+        # 2. 误差vs预测值散点图
+        axes[0, 1].scatter(pinn_predictions, train_errors, alpha=0.6, c='green', s=20)
+        axes[0, 1].axhline(0, color='red', linestyle='--', linewidth=1)
+        axes[0, 1].set_xlabel('PINN预测值')
+        axes[0, 1].set_ylabel('预测误差')
+        axes[0, 1].set_title('误差 vs PINN预测值')
+        axes[0, 1].grid(True, alpha=0.3)
+        
+        # 3. 3D空间误差分布
+        ax_3d = fig.add_subplot(2, 3, 3, projection='3d')
+        scatter = ax_3d.scatter(train_points[:, 0], train_points[:, 1], train_points[:, 2], 
+                               c=np.abs(train_errors), cmap='hot', s=30, alpha=0.7)
+        ax_3d.set_xlabel('X')
+        ax_3d.set_ylabel('Y') 
+        ax_3d.set_zlabel('Z')
+        ax_3d.set_title('3D空间误差分布')
+        plt.colorbar(scatter, ax=ax_3d, shrink=0.8)
+        
+        # 4. 误差累积分布函数
+        sorted_errors = np.sort(np.abs(train_errors))
+        y_vals = np.arange(1, len(sorted_errors) + 1) / len(sorted_errors)
+        axes[1, 0].plot(sorted_errors, y_vals, linewidth=2, color='purple')
+        axes[1, 0].set_xlabel('误差绝对值')
+        axes[1, 0].set_ylabel('累积概率')
+        axes[1, 0].set_title('误差累积分布函数')
+        axes[1, 0].grid(True, alpha=0.3)
+        
+        # 添加关键百分位线
+        percentiles = [50, 80, 90, 95]
+        colors = ['blue', 'orange', 'red', 'darkred']
+        for p, color in zip(percentiles, colors):
+            error_val = np.percentile(np.abs(train_errors), p)
+            axes[1, 0].axvline(error_val, color=color, linestyle='--', alpha=0.7, 
+                              label=f'{p}%: {error_val:.2e}')
+        axes[1, 0].legend()
+        
+        # 5. 预测值vs真实值散点图
+        axes[1, 1].scatter(true_values, pinn_predictions, alpha=0.6, c='cyan', s=20)
+        
+        # 完美预测线
+        min_val = min(np.min(true_values), np.min(pinn_predictions))
+        max_val = max(np.max(true_values), np.max(pinn_predictions))
+        axes[1, 1].plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='完美预测')
+        
+        axes[1, 1].set_xlabel('真实值')
+        axes[1, 1].set_ylabel('PINN预测值')
+        axes[1, 1].set_title('预测值 vs 真实值')
+        axes[1, 1].legend()
+        axes[1, 1].grid(True, alpha=0.3)
+        
+        # 6. 误差统计摘要表格
+        axes[1, 2].axis('off')
+        
+        # 计算相关性
+        from scipy.stats import pearsonr, spearmanr
+        pearson_corr, _ = pearsonr(true_values, pinn_predictions)
+        spearman_corr, _ = spearmanr(true_values, pinn_predictions)
+        
+        stats_text = f"""
+PINN预测性能详细分析:
+
+基本误差统计:
+• MAE: {np.mean(np.abs(train_errors)):.4e}
+• RMSE: {np.sqrt(np.mean(train_errors**2)):.4e}
+• MAPE: {np.mean(np.abs(train_errors)/(np.abs(true_values)+1e-8))*100:.2f}%
+• 最大误差: {np.max(np.abs(train_errors)):.4e}
+
+相关性分析:
+• Pearson相关系数: {pearson_corr:.4f}
+• Spearman相关系数: {spearman_corr:.4f}
+• R²决定系数: {1 - np.sum(train_errors**2)/np.sum((true_values-np.mean(true_values))**2):.4f}
+
+误差分布:
+• 误差均值: {np.mean(train_errors):.4e}
+• 误差标准差: {np.std(train_errors):.4e}
+• 正偏误差比例: {np.sum(train_errors>0)/len(train_errors)*100:.1f}%
+• 负偏误差比例: {np.sum(train_errors<0)/len(train_errors)*100:.1f}%
+
+数据范围:
+• 真实值范围: [{np.min(true_values):.2e}, {np.max(true_values):.2e}]
+• 预测值范围: [{np.min(pinn_predictions):.2e}, {np.max(pinn_predictions):.2e}]
+        """
+        
+        axes[1, 2].text(0.05, 0.95, stats_text, transform=axes[1, 2].transAxes,
+                        fontsize=9, verticalalignment='top', fontfamily='monospace',
+                        bbox=dict(boxstyle="round,pad=0.5", facecolor="lightblue", alpha=0.8))
+        
+        plt.tight_layout()
+        
+        if save_path:
+            fig.savefig(save_path, dpi=300, bbox_inches='tight')
             
         return fig
 
@@ -578,6 +733,7 @@ class PINNAdapter:
         self.is_fitted = False
         
     def fit(self, X: np.ndarray, y: np.ndarray, 
+           dose_data: Optional[Dict] = None,
            space_dims: List[float] = None,
            world_bounds: Dict = None,
            **kwargs) -> 'PINNAdapter':
@@ -587,72 +743,39 @@ class PINNAdapter:
         Args:
             X: 训练点坐标 (N, 3)
             y: 训练点数值 (N,)
+            dose_data: (可选) 包含完整物理信息的dose_data对象
             space_dims: 物理空间尺寸 [x, y, z]
             world_bounds: 世界坐标边界
             **kwargs: 额外的PINN参数
         """
         if not PINN_AVAILABLE:
             raise RuntimeError("PINN模块不可用")
-        
-        # ====== CUDA设备配置修复 ======
-        if self.config.gpu_enabled:
-            try:
-                import torch
-                import deepxde as dde
-                
-                # 强制设置PyTorch默认设备为CUDA
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()  # 清理GPU缓存
-                    torch.set_default_device('cuda')
-                    
-                    # 强制设置所有新创建的张量都在CUDA上
-                    torch.set_default_tensor_type('torch.cuda.FloatTensor')
-                    
-                    if self.config.verbose:
-                        print(f"✅ CUDA设备已设置: {torch.cuda.get_device_name(0)}")
-                        print(f"   默认张量类型: {torch.get_default_dtype()}")
-                        print(f"   默认设备: {torch.get_default_device()}")
-                else:
-                    if self.config.verbose:
-                        print("⚠️ CUDA不可用，切换到CPU模式")
-                    self.config.gpu_enabled = False
-            except Exception as e:
-                if self.config.verbose:
-                    print(f"⚠️ CUDA初始化失败: {e}，切换到CPU模式")
-                self.config.gpu_enabled = False
-        
-        if not self.config.gpu_enabled:
-            import torch
-            torch.set_default_device('cpu')
-            torch.set_default_tensor_type('torch.FloatTensor')
+            
+        # 优先使用传入的、真实的 dose_data 对象
+        if dose_data is not None:
             if self.config.verbose:
-                print("🔧 使用CPU模式")
+                print("   🔌 使用传入的真实 dose_data 进行PINN初始化")
+            self.dose_data = dose_data
+        else:
+            # 如果没有提供真实的 dose_data（例如，在处理合成数据时），
+            # 则回退到基于边界和虚拟网格的旧方法
+            if self.config.verbose:
+                print("   ⚠️ 未提供真实 dose_data，将创建虚拟网格进行PINN初始化。")
             
-        # 创建虚拟的dose_data结构（适配PINN接口）
-        if space_dims is None:
-            space_dims = [20.0, 10.0, 10.0]  # 默认尺寸
-            
-        if world_bounds is None:
-            world_bounds = {
-                'min': np.array([-10.0, -5.0, -5.0]),
-                'max': np.array([10.0, 5.0, 5.0])
-            }
+            processor = RadiationDataProcessor(space_dims, world_bounds)
+            grid_shape = (10, 10, 10)  # 最小网格用于初始化
+            dummy_grid = np.zeros(grid_shape)
+            self.dose_data = processor.load_from_numpy(dummy_grid, space_dims, world_bounds)
         
-        # 使用RadiationDataProcessor创建标准化数据格式
-        processor = RadiationDataProcessor(space_dims, world_bounds)
+        # 创建PINN训练器 - 与PINN子项目对齐：使用物理参数
+        physical_params = kwargs.get('physical_params', {
+            'rho_material': 1.205,  # 空气密度 kg/m³
+            'mass_energy_abs_coeff': 0.001901  # 质量能量吸收系数 m²/kg
+        })
+        self.trainer = PINNTrainer(physical_params=physical_params)
         
-        # 为了适配PINN接口，我们需要创建一个虚拟的3D网格
-        # 这里使用简化的方法：基于训练点创建最小边界网格
-        grid_shape = (10, 10, 10)  # 最小网格用于初始化
-        dummy_grid = np.zeros(grid_shape)
-        
-        self.dose_data = processor.load_from_numpy(dummy_grid, space_dims, world_bounds)
-        
-        # 创建PINN训练器
-        self.trainer = PINNTrainer()
-        
-        # 数据量控制 - 避免内存溢出
-        max_training_points = kwargs.get('max_training_points', 1000)
+        # 数据量控制 - 与PINN子项目对齐：固定使用300个训练点
+        max_training_points = kwargs.get('max_training_points', 300)
         if len(X) > max_training_points:
             if self.config.verbose:
                 print(f"⚠️ 训练数据量过大 ({len(X)} 点)，随机采样到 {max_training_points} 点")
@@ -663,12 +786,16 @@ class PINNAdapter:
         # 记录数据范围信息用于预测裁剪
         self.data_max_value = np.max(y) if len(y) > 0 else 1e6
         
-        # 转换输入数据格式
+        # 确保输入数据类型为 float32，这是导致CUDA错误的关键修复
+        X = X.astype(np.float32)
+        y = y.astype(np.float32)
+
+        # 转换输入数据格式 - 与PINN子项目对齐：使用对数变换
         sampled_log_doses = np.log(y + EPSILON)
         
-        # 创建PINN模型 - 使用更小的网络
+        # 创建PINN模型 - 使用配置中的网络参数，与PINN子项目对齐
         network_config = kwargs.get('network_config', {
-            'layers': [3, 20, 20, 20, 1],  # 更小的网络避免内存问题
+            'layers': self.config.pinn_network_layers,
             'activation': 'tanh'
         })
         
@@ -681,9 +808,10 @@ class PINNAdapter:
                 network_config=network_config
             )
             
-            # 训练模型
+            # 训练模型 - 使用配置参数，与PINN子项目对齐
             epochs = kwargs.get('epochs', self.config.pinn_epochs)
-            loss_weights = kwargs.get('loss_weights', None)
+            loss_weights = kwargs.get('loss_weights', self.config.pinn_loss_weights)
+            use_lbfgs = kwargs.get('use_lbfgs', self.config.pinn_use_lbfgs)
             
             # ====== 强制CPU训练修复CUDA问题 ======
             original_gpu_setting = self.config.gpu_enabled
@@ -694,39 +822,26 @@ class PINNAdapter:
                 torch.set_default_device('cpu')
                 self.config.gpu_enabled = False
             
+            if self.config.verbose:
+                print(f"🏋️ 开始PINN训练 - 轮数: {epochs}, L-BFGS: {use_lbfgs}, 权重: {loss_weights}")
+            
             self.trainer.train(
                 epochs=epochs,
-                use_lbfgs=kwargs.get('use_lbfgs', True),
+                use_lbfgs=use_lbfgs,  # 使用配置中的L-BFGS设置
                 loss_weights=loss_weights,
-                display_every=kwargs.get('display_every', 100)
+                display_every=kwargs.get('display_every', max(100, epochs//20))  # 动态调整显示频率
             )
             
             # 恢复原始GPU设置
             self.config.gpu_enabled = original_gpu_setting
             
-        except RuntimeError as e:
-            if "CUDA" in str(e):
-                if self.config.verbose:
-                    print(f"❌ CUDA训练失败: {e}")
-                    print("🔍 CUDA错误诊断:")
-                    
-                    import torch
-                    print(f"   CUDA可用: {torch.cuda.is_available()}")
-                    print(f"   CUDA设备数: {torch.cuda.device_count()}")
-                    print(f"   当前设备: {torch.cuda.current_device() if torch.cuda.is_available() else 'None'}")
-                    print(f"   默认张量类型: {torch.get_default_dtype()}")
-                    print(f"   GPU内存使用: {torch.cuda.memory_allocated()/1024**3:.2f}GB" if torch.cuda.is_available() else "N/A")
-                    
-                    # GPU加速是必需的，不允许CPU回退
-                    print("🚫 GPU加速是必需的，停止执行以便调试")
-                    
-                # 抛出详细的CUDA错误信息，不进行CPU回退
-                raise RuntimeError(f"CUDA训练失败，需要修复GPU配置: {e}")
-            else:
-                raise e
-        
-        self.is_fitted = True
-        return self
+            self.is_fitted = True
+            return self
+            
+        except Exception as e:
+            if self.config.verbose:
+                print(f"❌ PINN训练失败: {e}")
+            raise
         
     def predict(self, X: np.ndarray, **kwargs) -> np.ndarray:
         """
@@ -845,14 +960,32 @@ class Mode1ResidualKriging:
         valid_mask = np.isfinite(residuals)
         if not np.all(valid_mask):
             print(f"       ⚠️ 发现 {np.sum(~valid_mask)} 个无效残差值，将进行修复")
-            # 只有当residuals不是所有值都相同时才进行筛选
-            if np.std(residuals) > 1e-10:  # 如果有变化
-                residuals = residuals[valid_mask]
-            else:
-                # 如果所有值都相同且异常，替换为小的随机扰动
-                print("       🔧 残差值完全相同，添加小扰动以便Kriging建模")
-                base_residual = residuals[0] if np.isfinite(residuals[0]) else 0.0
-                residuals = base_residual + np.random.normal(0, abs(base_residual) * 0.01 + 1e-6, len(residuals))
+            residuals = residuals[valid_mask]
+            train_points = train_points[valid_mask]
+            train_values = train_values[valid_mask]
+            pinn_predictions = pinn_predictions[valid_mask]
+        
+        # 检查残差的数值特性
+        residual_std = np.std(residuals)
+        residual_range = np.max(residuals) - np.min(residuals)
+        
+        if residual_std < 1e-10 or residual_range < 1e-10:
+            # 如果残差变化极小，说明PINN预测过于一致，需要添加空间结构
+            print("       🔧 检测到残差空间变化过小，添加基于位置的微扰以改善Kriging建模")
+            
+            # 基于空间位置添加微扰，保持空间相关性
+            spatial_weights = np.linalg.norm(train_points - np.mean(train_points, axis=0), axis=1)
+            spatial_weights = (spatial_weights - np.min(spatial_weights)) / (np.max(spatial_weights) - np.min(spatial_weights) + 1e-10)
+            
+            # 添加与空间位置相关的微扰
+            base_residual = np.mean(residuals)
+            perturbation_scale = max(abs(base_residual) * 0.05, np.std(train_values) * 0.01, 1e-3)
+            
+            # 使用空间权重生成具有空间结构的微扰
+            spatial_perturbation = perturbation_scale * (spatial_weights - 0.5) * 2
+            random_perturbation = np.random.normal(0, perturbation_scale * 0.1, len(residuals))
+            
+            residuals = residuals + spatial_perturbation + random_perturbation
         
         # 对残差进行合理性检查和裁剪
         residuals = np.clip(residuals, -1e6, 1e6)
@@ -1286,6 +1419,7 @@ class CouplingWorkflow:
                           train_values: np.ndarray,
                           prediction_points: np.ndarray,
                           fusion_weight: Optional[float] = None,
+                          dose_data: Optional[Dict] = None,
                           **kwargs) -> Dict[str, Any]:
         """
         执行方案1完整流程: PINN → 残差Kriging → 加权融合
@@ -1298,13 +1432,85 @@ class CouplingWorkflow:
         
         # 步骤1: 训练PINN
         print("🔥 步骤1: 训练PINN模型...")
-        self.pinn_adapter.fit(train_points, train_values, **kwargs)
+        self.pinn_adapter.fit(
+            train_points, train_values,
+            space_dims=kwargs.get('space_dims'),
+            world_bounds=kwargs.get('world_bounds'),
+            dose_data=dose_data,
+            epochs=kwargs.get('epochs'),
+            max_training_points=kwargs.get('max_training_points'),
+            loss_weights=self.config.pinn_loss_weights,
+            use_lbfgs=self.config.pinn_use_lbfgs
+        )
         
         # 步骤2: PINN预测
         print("🔮 步骤2: PINN全场预测...")
         pinn_train_pred = self.pinn_adapter.predict(train_points)
         pinn_field_pred = self.pinn_adapter.predict(prediction_points)
+        
+        # ==================== 新增：详细PINN误差统计 ====================
+        print("\n📊 步骤2.1: PINN误差分析...")
+        
+        # 训练点误差统计
+        train_errors = train_values - pinn_train_pred
+        train_metrics = {
+            '训练集MAE': np.mean(np.abs(train_errors)),
+            '训练集RMSE': np.sqrt(np.mean(train_errors**2)),
+            '训练集MAPE': np.mean(np.abs(train_errors) / (np.abs(train_values) + EPSILON)) * 100,
+            '训练集最大误差': np.max(np.abs(train_errors)),
+            '训练集R²': 1 - np.sum(train_errors**2) / np.sum((train_values - np.mean(train_values))**2)
+        }
+        
+        print("   🎯 PINN训练集性能:")
+        for metric, value in train_metrics.items():
+            print(f"      {metric}: {value:.4f}")
+        
+        # 预测值统计信息  
+        print("   🔍 PINN预测统计: 范围[{:.2e}, {:.2e}]".format(np.min(pinn_train_pred), np.max(pinn_train_pred)))
+        print("   📊 有效预测数量: {}".format(len(pinn_train_pred)))
+        
+        # 预测点预测值统计
+        print("   🔍 PINN预测统计: 范围[{:.2e}, {:.2e}]".format(np.min(pinn_field_pred), np.max(pinn_field_pred)))
+        print("   📊 有效预测数量: {}".format(len(pinn_field_pred)))
+        
+        # 添加误差分布统计
+        error_percentiles = [5, 25, 50, 75, 95]
+        error_stats = np.percentile(np.abs(train_errors), error_percentiles)
+        print("   📈 训练误差分布 (绝对值):")
+        for p, val in zip(error_percentiles, error_stats):
+            print(f"      {p}%分位数: {val:.4e}")
+        
+        # 检查异常值
+        error_threshold = np.mean(np.abs(train_errors)) + 3 * np.std(np.abs(train_errors))
+        outlier_count = np.sum(np.abs(train_errors) > error_threshold)
+        outlier_percentage = outlier_count / len(train_errors) * 100
+        print(f"   ⚠️ 异常误差点: {outlier_count}个 ({outlier_percentage:.1f}%)")
+        
+        # 空间误差分析（如果训练点较多）
+        if len(train_points) >= 10:
+            # 计算误差的空间相关性
+            spatial_distances = np.linalg.norm(train_points[:, None] - train_points[None, :], axis=2)
+            error_correlations = []
+            
+            # 选择几个距离范围来分析误差相关性
+            distance_ranges = [0.5, 1.0, 2.0, 5.0]
+            for dist_range in distance_ranges:
+                close_pairs = (spatial_distances > 0) & (spatial_distances < dist_range)
+                if np.sum(close_pairs) > 0:
+                    error_pairs = train_errors[:, None] * train_errors[None, :]
+                    mean_error_corr = np.mean(error_pairs[close_pairs])
+                    error_correlations.append((dist_range, mean_error_corr))
+            
+            if error_correlations:
+                print("   🗺️ 空间误差相关性:")
+                for dist, corr in error_correlations:
+                    print(f"      距离<{dist:.1f}m: 相关性={corr:.4e}")
+        
+        # 存储误差统计结果
+        results['pinn_train_errors'] = train_errors
+        results['pinn_train_metrics'] = train_metrics
         results['pinn_predictions'] = pinn_field_pred
+        # ==================== PINN误差统计结束 ====================
         
         # 步骤3: 残差Kriging
         print("⚡ 步骤3: 残差Kriging插值...")
@@ -1350,6 +1556,7 @@ class CouplingWorkflow:
                           prediction_points: np.ndarray,
                           roi_strategy: Optional[str] = None,
                           augment_factor: Optional[float] = None,
+                          dose_data: Optional[Dict] = None,
                           **kwargs) -> Dict[str, Any]:
         """
         执行方案2完整流程: Kriging ROI样本扩充 → PINN重训练
@@ -1381,7 +1588,15 @@ class CouplingWorkflow:
         # 步骤3: 用扩充数据重新训练PINN
         print("🔥 步骤3: 用扩充数据重新训练PINN...")
         enhanced_pinn = PINNAdapter(self.config)
-        enhanced_pinn.fit(augmented_points, augmented_values, **kwargs)
+        enhanced_pinn.fit(
+            augmented_points, augmented_values,
+            space_dims=kwargs.get('space_dims'),
+            world_bounds=kwargs.get('world_bounds'),
+            dose_data=dose_data,
+            epochs=kwargs.get('epochs'),
+            loss_weights=self.config.pinn_loss_weights,
+            use_lbfgs=self.config.pinn_use_lbfgs
+        )
         
         # 步骤4: 最终预测
         print("🔮 步骤4: 增强PINN全场预测...")

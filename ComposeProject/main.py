@@ -25,6 +25,7 @@ from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
+import torch
 
 # 导入自定义模块
 from ComposeTools import (
@@ -171,15 +172,15 @@ def load_real_data_from_excel(data_file_path: str = "../PINN/DATA.xlsx") -> tupl
         space_dims=[20.0, 10.0, 10.0]  # 根据实际物理尺寸调整
     )
     
-    # 采样训练数据（使用positive_only策略，避免零值）
-    train_points, train_values, _ = DataLoader.sample_training_points(
+    # 采样训练数据 - 与PINN子项目完全对齐：300个样本，positive_only策略
+    train_points, train_values, train_log_values = DataLoader.sample_training_points(
         dose_data, 
         num_samples=300, 
         sampling_strategy='positive_only'
     )
     
     # 采样测试数据（更少的点用于测试）
-    test_points, test_values, _ = DataLoader.sample_training_points(
+    test_points, test_values, test_log_values = DataLoader.sample_training_points(
         dose_data,
         num_samples=150,
         sampling_strategy='positive_only'
@@ -379,10 +380,11 @@ def run_mode1(args):
             fusion_weight=args.fusion_weight,
             space_dims=field_info['space_dims'],
             world_bounds=field_info['world_bounds'],
+            dose_data=field_info.get('dose_data'),
             kriging_params={'variogram_model': args.variogram_model},
             epochs=args.pinn_epochs,
-            max_training_points=200,  # 大幅减少训练点数避免CUDA内存问题
-            network_config={'layers': [3, 16, 16, 1], 'activation': 'tanh'}  # 使用更小的网络避免CUDA内存问题
+            max_training_points=300,  # 使用完整数据集
+            # 移除硬编码网络配置，使用配置中的默认值（与PINN子项目对齐）
         )
         
         execution_time = time.time() - start_time
@@ -391,6 +393,41 @@ def run_mode1(args):
         # 评估结果
         print("\n📈 结果评估...")
         final_predictions = results['final_predictions']
+        
+        # ==================== 新增：详细PINN误差展示 ====================
+        print("\n📊 详细PINN误差分析报告:")
+        print("="*50)
+        
+        # 显示PINN训练误差统计
+        if 'pinn_train_metrics' in results:
+            train_metrics = results['pinn_train_metrics']
+            print("\n🎯 PINN训练集误差指标:")
+            for metric, value in train_metrics.items():
+                if 'MAPE' in metric:
+                    print(f"   {metric}: {value:.2f}%")
+                else:
+                    print(f"   {metric}: {value:.4f}")
+        
+        # 显示残差统计信息
+        if 'pinn_train_errors' in results:
+            train_errors = results['pinn_train_errors']
+            print(f"\n📈 残差分布详情:")
+            print(f"   残差均值: {np.mean(train_errors):.4e}")
+            print(f"   残差标准差: {np.std(train_errors):.4e}")
+            print(f"   残差范围: [{np.min(train_errors):.4e}, {np.max(train_errors):.4e}]")
+            
+            # 残差符号分析
+            positive_errors = np.sum(train_errors > 0)
+            negative_errors = np.sum(train_errors < 0)
+            zero_errors = np.sum(train_errors == 0)
+            total_errors = len(train_errors)
+            
+            print(f"   正残差: {positive_errors}个 ({positive_errors/total_errors*100:.1f}%)")
+            print(f"   负残差: {negative_errors}个 ({negative_errors/total_errors*100:.1f}%)")
+            print(f"   零残差: {zero_errors}个 ({zero_errors/total_errors*100:.1f}%)")
+        
+        print("="*50)
+        # ==================== 详细PINN误差展示结束 ====================
         
         # 计算各种预测的误差指标
         pinn_metrics = MetricsCalculator.compute_metrics(test_values, results['pinn_predictions'])
@@ -438,12 +475,22 @@ def run_mode1(args):
             final_residuals = final_predictions - test_values
             fig3 = VisualizationTools.plot_residual_analysis(final_residuals, test_points)
             
+            # PINN误差深度分析图（如果有训练误差数据）
+            fig4 = None
+            if 'pinn_train_errors' in results:
+                pinn_train_pred = results['pinn_predictions'][:len(train_values)]  # 训练点的预测
+                fig4 = VisualizationTools.plot_pinn_error_analysis(
+                    results['pinn_train_errors'], train_points, pinn_train_pred, train_values
+                )
+            
             if args.save_plots:
                 plots_dir = Path("plots")
                 plots_dir.mkdir(exist_ok=True)
                 fig1.savefig(plots_dir / "mode1_pinn_baseline.png", dpi=300, bbox_inches='tight')
                 fig2.savefig(plots_dir / "mode1_fusion_result.png", dpi=300, bbox_inches='tight')
                 fig3.savefig(plots_dir / "mode1_residual_analysis.png", dpi=300, bbox_inches='tight')
+                if fig4 is not None:
+                    fig4.savefig(plots_dir / "mode1_pinn_error_analysis.png", dpi=300, bbox_inches='tight')
                 print(f"   📊 可视化结果已保存至 {plots_dir}/")
             
             if args.show_plots:
@@ -519,7 +566,7 @@ def run_mode2(args):
             augment_factor=args.augment_factor,
             space_dims=field_info['space_dims'],
             world_bounds=field_info['world_bounds'],
-            roi_params={'density_percentile': 70, 'expansion_factor': 1.3},
+            dose_data=field_info.get('dose_data'),
             kriging_params={'variogram_model': args.variogram_model},
             epochs=args.pinn_epochs
         )
@@ -653,8 +700,8 @@ def create_argument_parser():
     parser.add_argument('--verbose', action='store_true', default=True, help='详细输出')
     parser.add_argument('--quiet', dest='verbose', action='store_false', help='简洁输出')
     
-    # PINN参数
-    parser.add_argument('--pinn_epochs', type=int, default=500, help='PINN训练轮数 (默认: 500)')
+    # PINN参数 - 与PINN子项目对齐
+    parser.add_argument('--pinn_epochs', type=int, default=10000, help='PINN训练轮数 (默认: 10000，与PINN子项目对齐)')
     
     # Kriging参数
     parser.add_argument('--variogram_model', choices=['linear', 'exponential', 'gaussian'], 

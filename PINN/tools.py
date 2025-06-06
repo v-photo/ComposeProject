@@ -130,7 +130,7 @@ class RadiationDataProcessor:
         print(f"Data dimensions: X={x_size}, Y={y_size}, Z={z_size}")
         
         # Create 3D dose grid
-        dose_grid = np.zeros((x_size, y_size, z_size), dtype=np.float64)
+        dose_grid = np.zeros((x_size, y_size, z_size), dtype=np.float32)
         
         for z_idx, z_coord in enumerate(z_coords):
             layer_data = data_dict[z_coord]
@@ -142,7 +142,7 @@ class RadiationDataProcessor:
                 layer_array = np.array(layer_data)
             
             # Note: transpose to match expected grid convention (x, y, z)
-            dose_grid[:, :, z_idx] = layer_array.T
+            dose_grid[:, :, z_idx] = layer_array.T.astype(np.float32)
         
         # Handle physical dimensions and bounds
         if space_dims is not None:
@@ -172,12 +172,12 @@ class RadiationDataProcessor:
         # Create standardized dose_data format
         self.dose_data = {
             'dose_grid': dose_grid,
-            'world_min': world_min,
-            'world_max': world_max,
-            'voxel_size': voxel_size,
+            'world_min': world_min.astype(np.float32),
+            'world_max': world_max.astype(np.float32),
+            'voxel_size': voxel_size.astype(np.float32),
             'grid_shape': grid_shape,
-            'space_dims': self.space_dims,
-            'z_coords': np.array(z_coords),
+            'space_dims': self.space_dims.astype(np.float32),
+            'z_coords': np.array(z_coords).astype(np.float32),
             'original_data_dict': data_dict  # Keep reference to original data
         }
         
@@ -222,12 +222,12 @@ class RadiationDataProcessor:
         voxel_size = (world_max - world_min) / grid_shape
         
         self.dose_data = {
-            'dose_grid': dose_array.astype(np.float64),
-            'world_min': world_min,
-            'world_max': world_max,
-            'voxel_size': voxel_size,
+            'dose_grid': dose_array.astype(np.float32),
+            'world_min': world_min.astype(np.float32),
+            'world_max': world_max.astype(np.float32),
+            'voxel_size': voxel_size.astype(np.float32),
             'grid_shape': grid_shape,
-            'space_dims': self.space_dims
+            'space_dims': self.space_dims.astype(np.float32)
         }
         
         print(f"Loaded numpy array: shape {dose_array.shape}, range {np.min(dose_array):.2e} to {np.max(dose_array):.2e}")
@@ -461,7 +461,7 @@ class DataLoader:
         print(f"Sampled {len(sampled_indices)} training points using '{sampling_strategy}' strategy")
         print(f"Dose range in samples: {np.min(sampled_doses_values):.2e} to {np.max(sampled_doses_values):.2e}")
         
-        return sampled_points_xyz, sampled_doses_values, sampled_log_doses_values
+        return sampled_points_xyz.astype(np.float32), sampled_doses_values.astype(np.float32), sampled_log_doses_values.astype(np.float32)
 
 class GPUMonteCarloSimulator:
     """GPU-accelerated Monte Carlo radiation transport simulator (optional internal MC)"""
@@ -668,12 +668,10 @@ class PINNTrainer:
             include_source: Whether to include source parameterization
             network_config: Dict with network configuration
         """
-        print("定义并训练PINN...")
-        
-        # Geometry from dose data
-        world_min = dose_data['world_min']
-        world_max = dose_data['world_max']
-        self.geometry = dde.geometry.Cuboid(world_min, world_max)
+        self.dose_data = dose_data
+        self.world_min = dose_data['world_min']
+        self.world_max = dose_data['world_max']
+        self.geometry = dde.geometry.Cuboid(self.world_min, self.world_max)
         
         # Network configuration
         if network_config is None:
@@ -704,11 +702,6 @@ class PINNTrainer:
                 'log_sigma_s_sq': dde.Variable(float(source_init_params.get('log_sigma_s_sq', np.log(0.5))))
             }
             
-            print(f"源项参数初始值 (使用 {source_init_method} 方法):")
-            print(f"  位置: ({source_init_params.get('xs', 0.0):.2f}, {source_init_params.get('ys', 0.0):.2f}, {source_init_params.get('zs', 0.0):.2f})")
-            print(f"  强度: {source_init_params.get('As', 1.0):.2e}")
-            print(f"  扩散: {np.sqrt(np.exp(source_init_params.get('log_sigma_s_sq', np.log(0.5)))):.2f}")
-                    
             def pde_with_source(x, u):
                 return self._pde_with_source(x, u)
             
@@ -802,13 +795,8 @@ class PINNTrainer:
             trainable_variables.extend(list(self.source_params.values()))
         
         # Adam training
-        print("开始Adam训练...")
         self.model.compile("adam", lr=1e-3, loss_weights=loss_weights, 
                         external_trainable_variables=trainable_variables)
-        
-        # 打印初始参数
-        print("=== 初始参数值 ===")
-        self._print_current_parameters()
         
         # 分阶段训练，每个阶段后打印参数
         stages = [epochs // 4, epochs // 2, epochs * 3 // 4, epochs]
@@ -817,38 +805,23 @@ class PINNTrainer:
         for i, stage in enumerate(stages):
             current_epochs = stage - last_epoch
             if current_epochs > 0:
-                print(f"\n训练阶段 {i+1}/4: 第 {last_epoch+1} 到 {stage} epoch...")
                 losshistory, train_state = self.model.train(
                     iterations=current_epochs, 
                     display_every=100
                 )
                 
-                print(f"\n--- 第 {stage} epoch 参数状态 ---")
-                self._print_current_parameters()
-                
             last_epoch = stage
         
         # L-BFGS refinement
         if use_lbfgs:
-            print("\n=== 切换到L-BFGS优化 ===")
             self.model.compile("L-BFGS", loss_weights=loss_weights, 
                             external_trainable_variables=trainable_variables)
             
-            print("开始L-BFGS精细调优...")
             losshistory_lbfgs, train_state_lbfgs = self.model.train(
                 display_every=50
             )
-            
-            print("\n--- L-BFGS优化后参数 ---")
-            self._print_current_parameters()
         
         pinn_end_time = time.time()
-        print(f"\n=== 训练完成 ===")
-        print(f"总耗时: {pinn_end_time - pinn_start_time:.2f} 秒")
-        
-        # 打印最终参数
-        print("\n=== 最终学习参数 ===")
-        self._print_current_parameters()
     
     def _get_scalar_value(self, variable):
         """Extract scalar value from DeepXDE variable"""
@@ -882,23 +855,6 @@ class PINNTrainer:
         
         return k_val, None
 
-    def _print_current_parameters(self):
-        """打印当前参数值的辅助方法"""
-        k_val = self._get_scalar_value(self.k_pinn)
-        print(f"k_pinn: {k_val:.6f}")
-        
-        if self.source_params:
-            xs_val = self._get_scalar_value(self.source_params['xs'])
-            ys_val = self._get_scalar_value(self.source_params['ys'])
-            zs_val = self._get_scalar_value(self.source_params['zs'])
-            As_val = self._get_scalar_value(self.source_params['As'])
-            log_sigma_val = self._get_scalar_value(self.source_params['log_sigma_s_sq'])
-            
-            print(f"源参数:")
-            print(f"  位置: ({xs_val:.3f}, {ys_val:.3f}, {zs_val:.3f})")
-            print(f"  强度: {As_val:.2e}")
-            print(f"  扩散: {np.sqrt(np.exp(log_sigma_val)):.3f}")
-
     def _estimate_source_initial_params(self, dose_data, sampled_points_xyz, sampled_doses_values, 
                                        method='weighted_centroid', prior_knowledge=None):
         """
@@ -911,8 +867,6 @@ class PINNTrainer:
             method: 初始化方法 ('weighted_centroid', 'geometric_center', 'prior_based', 'gradient_based')
             prior_knowledge: 先验知识字典，如 {'source_region': [xmin, xmax, ymin, ymax, zmin, zmax]}
         """
-        print(f"使用 '{method}' 方法估计源项参数初始值...")
-        
         world_min = dose_data['world_min']
         world_max = dose_data['world_max']
         
@@ -960,7 +914,6 @@ class PINNTrainer:
                     source_pos_init = (world_min + world_max) / 2.0
                     
             except Exception as e:
-                print(f"梯度方法失败，降级到几何中心: {e}")
                 source_pos_init = (world_min + world_max) / 2.0
         else:
             # 默认：几何中心
@@ -1008,12 +961,6 @@ class PINNTrainer:
             'log_sigma_s_sq': np.log(sigma_init**2)
         }
         
-        print(f"初始化结果:")
-        print(f"  源位置: ({result['xs']:.3f}, {result['ys']:.3f}, {result['zs']:.3f}) m")
-        print(f"  源强度: {result['As']:.3e}")
-        print(f"  源扩散: {sigma_init:.3f} m") 
-        print(f"  采样统计: 中位数剂量={median_dose:.3e}, 90分位数剂量={percentile_90_dose:.3e}")
-        
         return result
 
     def validate_parameter_updates(self, initial_params=None):
@@ -1021,19 +968,14 @@ class PINNTrainer:
         if initial_params is None:
             return "请在训练前调用此方法并保存初始参数"
         
-        print("\n=== 参数更新验证 ===")
         current_k = self._get_scalar_value(self.k_pinn)
         initial_k = initial_params.get('k_pinn', self.k_initial_guess)
         
-        print(f"k_pinn: {initial_k:.6f} -> {current_k:.6f} (变化: {abs(current_k - initial_k):.6f})")
-        
         if self.source_params and 'source_params' in initial_params:
-            print("源项参数:")
             for name, var in self.source_params.items():
                 current_val = self._get_scalar_value(var)
                 initial_val = initial_params['source_params'][name]
                 change = abs(current_val - initial_val)
-                print(f"  {name}: {initial_val:.6f} -> {current_val:.6f} (变化: {change:.6f})")
         
         return True
 
@@ -1056,8 +998,6 @@ class ResultAnalyzer:
         Returns:
             dict: Evaluation results
         """
-        print("\nPINN预测与评估...")
-        
         dose_grid_mc = dose_mc_data['dose_grid']
         
         # Interpolate PINN to MC grid for fair comparison
@@ -1084,8 +1024,6 @@ class ResultAnalyzer:
         dose_pinn_on_mc_grid = dose_pinn_on_mc_grid_flat.reshape(mc_grid_shape)
         
         # Calculate errors
-        # important(在这里可以设定只考虑剂量率大于前百分之几最大值的数据，默认设置为1%)
-        # valid_comparison_mask = (dose_grid_mc > (0.01 * np.max(dose_grid_mc))) #这个用于测试对所有高剂量率点处的预测效果
         valid_comparison_mask = (dose_grid_mc < np.max(dose_grid_mc))
         diff_abs = np.abs(dose_pinn_on_mc_grid[valid_comparison_mask] - dose_grid_mc[valid_comparison_mask])
         relative_error = diff_abs / (np.abs(dose_grid_mc[valid_comparison_mask]) + EPSILON)
@@ -1094,11 +1032,6 @@ class ResultAnalyzer:
         mae = np.mean(np.abs(dose_pinn_on_mc_grid - dose_grid_mc))
         rmse = np.sqrt(np.mean((dose_pinn_on_mc_grid - dose_grid_mc)**2))
         
-        print(f"PINN Mean Relative Error on MC grid: {mean_relative_error:.4%}")
-        print(f"PINN MAE on MC grid: {mae:.4e}")
-        print(f"PINN RMSE on MC grid: {rmse:.4e}")
-        
-        # Training point evaluation if provided
         training_results = {}
         if sampled_points_xyz is not None and sampled_doses_values is not None:
             # Evaluate on training points
@@ -1109,7 +1042,6 @@ class ResultAnalyzer:
                 'training_mre': mre_training,
                 'dose_pinn_on_samples': dose_pinn_on_samples
             }
-            print(f"PINN Mean Relative Error on training points: {mre_training:.4%}")
         
         return {
             'mean_relative_error': mean_relative_error,
