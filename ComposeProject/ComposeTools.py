@@ -691,3 +691,578 @@ def validate_compose_environment() -> Dict[str, bool]:
         print(f"{component}: {status_str}")
     
     return status 
+
+# ==================== 方案1专用功能 (Mode 1 Specific) ====================
+# PINN → 残差Kriging → 加权融合
+
+class Mode1ResidualKriging:
+    """
+    方案1: 残差克里金插值专用工具
+    Mode 1: Residual Kriging specific tools
+    """
+    
+    def __init__(self, config: ComposeConfig = None):
+        self.config = config or ComposeConfig()
+        self.kriging_adapter = KrigingAdapter(config)
+        
+    def compute_residuals(self, 
+                         train_points: np.ndarray,
+                         train_values: np.ndarray, 
+                         pinn_predictions: np.ndarray) -> np.ndarray:
+        """
+        计算PINN预测与真实值的残差
+        Compute residuals between PINN predictions and true values
+        
+        Args:
+            train_points: 训练点坐标 (N, 3)
+            train_values: 真实训练值 (N,)
+            pinn_predictions: PINN在训练点的预测值 (N,)
+            
+        Returns:
+            residuals: 残差 = 真实值 - PINN预测值 (N,)
+        """
+        if len(train_values) != len(pinn_predictions):
+            raise ValueError("真实值和PINN预测值的长度不匹配")
+            
+        residuals = train_values - pinn_predictions
+        
+        if self.config.verbose:
+            print(f"残差统计: 均值={np.mean(residuals):.4e}, 标准差={np.std(residuals):.4e}")
+            print(f"残差范围: [{np.min(residuals):.4e}, {np.max(residuals):.4e}]")
+            
+        return residuals
+        
+    def residual_kriging(self,
+                        train_points: np.ndarray,
+                        train_values: np.ndarray,
+                        pinn_predictions: np.ndarray,
+                        prediction_points: np.ndarray,
+                        return_uncertainty: bool = True,
+                        **kriging_params) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+        """
+        对残差进行克里金插值
+        Perform Kriging interpolation on residuals
+        
+        Args:
+            train_points: 训练点坐标 (N, 3)
+            train_values: 真实训练值 (N,)
+            pinn_predictions: PINN在训练点的预测值 (N,)
+            prediction_points: 预测点坐标 (M, 3)
+            return_uncertainty: 是否返回不确定度
+            **kriging_params: 克里金参数
+            
+        Returns:
+            residual_predictions: 残差预测 (M,)
+            如果return_uncertainty=True: (residual_predictions, residual_std)
+        """
+        # 计算残差
+        residuals = self.compute_residuals(train_points, train_values, pinn_predictions)
+        
+        # 训练残差克里金模型
+        self.kriging_adapter.fit(train_points, residuals, **kriging_params)
+        
+        # 预测残差
+        if return_uncertainty and self.config.kriging_enable_uncertainty:
+            residual_pred, residual_std = self.kriging_adapter.predict(
+                prediction_points, return_std=True
+            )
+            return residual_pred, residual_std
+        else:
+            residual_pred = self.kriging_adapter.predict(prediction_points, return_std=False)
+            if return_uncertainty:
+                # 如果请求不确定度但不可用，返回零不确定度
+                return residual_pred, np.zeros_like(residual_pred)
+            else:
+                return residual_pred
+
+class Mode1Fusion:
+    """
+    方案1: 加权融合工具
+    Mode 1: Weighted fusion tools
+    """
+    
+    @staticmethod
+    def fuse_residual(pinn_pred: np.ndarray,
+                     kriging_residual: np.ndarray, 
+                     weight: float = 0.5,
+                     uncertainty: Optional[np.ndarray] = None) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+        """
+        加权融合PINN预测和残差预测
+        Weighted fusion of PINN predictions and residual predictions
+        
+        Args:
+            pinn_pred: PINN预测值 (N,)
+            kriging_residual: Kriging残差预测值 (N,)  
+            weight: 残差权重 ω ∈ (0,1), 最终预测 = PINN + ω×残差
+            uncertainty: Kriging残差的不确定度 (N,) [可选]
+            
+        Returns:
+            fused_prediction: 融合预测 (N,)
+            如果提供uncertainty: (fused_prediction, confidence_bounds)
+        """
+        if len(pinn_pred) != len(kriging_residual):
+            raise ValueError("PINN预测和残差预测的长度不匹配")
+            
+        if not 0 < weight < 1:
+            warnings.warn(f"权重 {weight} 不在推荐范围 (0,1) 内")
+        
+        # 加权融合
+        fused_pred = pinn_pred + weight * kriging_residual
+        
+        if uncertainty is not None:
+            # 计算置信界 (假设PINN无不确定度，只考虑Kriging残差的不确定度)
+            # 95%置信界 ≈ ±1.96σ  
+            confidence_bounds = weight * 1.96 * uncertainty
+            return fused_pred, confidence_bounds
+        else:
+            return fused_pred
+    
+    @staticmethod
+    def adaptive_weight_strategy(residuals: np.ndarray,
+                               kriging_std: Optional[np.ndarray] = None,
+                               strategy: str = 'variance_based') -> np.ndarray:
+        """
+        自适应权重策略
+        Adaptive weighting strategy
+        
+        Args:
+            residuals: 残差值 (N,)
+            kriging_std: Kriging标准差 (N,) [可选]
+            strategy: 权重策略 ('variance_based', 'magnitude_based', 'uniform')
+            
+        Returns:
+            weights: 自适应权重 (N,)
+        """
+        n_points = len(residuals)
+        
+        if strategy == 'uniform':
+            return np.full(n_points, 0.5)
+        
+        elif strategy == 'magnitude_based':
+            # 基于残差幅度：残差越大，权重越高
+            abs_residuals = np.abs(residuals)
+            max_residual = np.max(abs_residuals) 
+            weights = 0.1 + 0.8 * (abs_residuals / (max_residual + EPSILON))
+            return np.clip(weights, 0.1, 0.9)
+        
+        elif strategy == 'variance_based' and kriging_std is not None:
+            # 基于Kriging不确定度：不确定度越小，权重越高
+            normalized_std = kriging_std / (np.max(kriging_std) + EPSILON)
+            weights = 0.1 + 0.8 * (1 - normalized_std)  # 反比关系
+            return np.clip(weights, 0.1, 0.9)
+        
+        else:
+            warnings.warn(f"不支持的权重策略 '{strategy}' 或缺少必要数据，使用均匀权重")
+            return np.full(n_points, 0.5)
+
+# ==================== 方案2专用功能 (Mode 2 Specific) ====================  
+# Kriging在ROI生成新样本 → 扩充数据 → 重新训练PINN
+
+class Mode2ROIDetector:
+    """
+    方案2: 感兴趣区域(ROI)检测器
+    Mode 2: Region of Interest (ROI) detector
+    """
+    
+    @staticmethod
+    def detect_roi(train_points: np.ndarray,
+                  train_values: np.ndarray,
+                  roi_strategy: str = 'high_density',
+                  **strategy_params) -> Dict[str, np.ndarray]:
+        """
+        检测相关区域 (Region of Interest)
+        Detect region of interest for sample augmentation
+        
+        Args:
+            train_points: 训练点坐标 (N, 3)
+            train_values: 训练点数值 (N,)
+            roi_strategy: ROI检测策略
+            **strategy_params: 策略相关参数
+            
+        Returns:
+            roi_bounds: ROI边界信息 {'min': [x,y,z], 'max': [x,y,z], 'mask': bool_array}
+        """
+        if roi_strategy == 'high_density':
+            return Mode2ROIDetector._detect_high_density_roi(
+                train_points, train_values, **strategy_params
+            )
+        elif roi_strategy == 'high_value':
+            return Mode2ROIDetector._detect_high_value_roi(
+                train_points, train_values, **strategy_params
+            )
+        elif roi_strategy == 'bounding_box':
+            return Mode2ROIDetector._detect_bounding_box_roi(
+                train_points, train_values, **strategy_params
+            )
+        else:
+            raise ValueError(f"不支持的ROI策略: {roi_strategy}")
+    
+    @staticmethod
+    def _detect_high_density_roi(train_points: np.ndarray,
+                               train_values: np.ndarray,
+                               density_percentile: float = 75,
+                               expansion_factor: float = 1.2) -> Dict[str, np.ndarray]:
+        """高密度区域检测策略"""
+        from scipy.spatial import cKDTree
+        
+        # 计算每个点的局部密度
+        tree = cKDTree(train_points)
+        # 计算到第5近邻的距离作为密度的逆指标
+        k = min(5, len(train_points) - 1)
+        distances, _ = tree.query(train_points, k=k+1)  # k+1因为包含自身
+        local_density = 1 / (np.mean(distances[:, 1:], axis=1) + EPSILON)  # 排除自身
+        
+        # 选择高密度点
+        density_threshold = np.percentile(local_density, density_percentile)
+        high_density_mask = local_density >= density_threshold
+        
+        if not np.any(high_density_mask):
+            # 如果没有高密度点，使用所有点
+            high_density_mask = np.ones(len(train_points), dtype=bool)
+        
+        roi_points = train_points[high_density_mask]
+        
+        # 计算ROI边界
+        roi_min = np.min(roi_points, axis=0)
+        roi_max = np.max(roi_points, axis=0)
+        
+        # 扩展边界
+        roi_center = (roi_min + roi_max) / 2
+        roi_size = (roi_max - roi_min) * expansion_factor
+        roi_min = roi_center - roi_size / 2
+        roi_max = roi_center + roi_size / 2
+        
+        return {
+            'min': roi_min,
+            'max': roi_max, 
+            'mask': high_density_mask,
+            'density_scores': local_density
+        }
+    
+    @staticmethod
+    def _detect_high_value_roi(train_points: np.ndarray,
+                             train_values: np.ndarray,
+                             value_percentile: float = 80,
+                             expansion_factor: float = 1.5) -> Dict[str, np.ndarray]:
+        """高数值区域检测策略"""
+        # 选择高数值点
+        value_threshold = np.percentile(train_values, value_percentile)
+        high_value_mask = train_values >= value_threshold
+        
+        if not np.any(high_value_mask):
+            # 如果没有高数值点，使用数值大于0的点
+            high_value_mask = train_values > 0
+            
+        if not np.any(high_value_mask):
+            # 如果仍然没有，使用所有点
+            high_value_mask = np.ones(len(train_points), dtype=bool)
+        
+        roi_points = train_points[high_value_mask]
+        
+        # 计算ROI边界并扩展
+        roi_min = np.min(roi_points, axis=0)
+        roi_max = np.max(roi_points, axis=0)
+        
+        roi_center = (roi_min + roi_max) / 2
+        roi_size = (roi_max - roi_min) * expansion_factor
+        roi_min = roi_center - roi_size / 2
+        roi_max = roi_center + roi_size / 2
+        
+        return {
+            'min': roi_min,
+            'max': roi_max,
+            'mask': high_value_mask,
+            'value_scores': train_values
+        }
+    
+    @staticmethod
+    def _detect_bounding_box_roi(train_points: np.ndarray,
+                               train_values: np.ndarray,
+                               expansion_factor: float = 1.1) -> Dict[str, np.ndarray]:
+        """包围盒ROI检测策略"""
+        # 使用所有训练点的包围盒
+        roi_min = np.min(train_points, axis=0)
+        roi_max = np.max(train_points, axis=0)
+        
+        # 轻微扩展
+        roi_center = (roi_min + roi_max) / 2
+        roi_size = (roi_max - roi_min) * expansion_factor
+        roi_min = roi_center - roi_size / 2
+        roi_max = roi_center + roi_size / 2
+        
+        # 所有点都在ROI内
+        all_points_mask = np.ones(len(train_points), dtype=bool)
+        
+        return {
+            'min': roi_min,
+            'max': roi_max,
+            'mask': all_points_mask,
+            'bounding_box': True
+        }
+
+class Mode2SampleAugmentor:
+    """
+    方案2: 样本扩充器  
+    Mode 2: Sample augmentor using Kriging
+    """
+    
+    def __init__(self, config: ComposeConfig = None):
+        self.config = config or ComposeConfig()
+        self.kriging_adapter = KrigingAdapter(config)
+        
+    def augment_by_kriging(self,
+                          train_points: np.ndarray,
+                          train_values: np.ndarray,
+                          roi_bounds: Dict[str, np.ndarray],
+                          augment_factor: float = 2.0,
+                          sampling_strategy: str = 'grid',
+                          **kriging_params) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        在ROI内用Kriging生成新样本
+        Generate new samples in ROI using Kriging
+        
+        Args:
+            train_points: 原始训练点坐标 (N, 3)
+            train_values: 原始训练值 (N,)
+            roi_bounds: ROI边界信息
+            augment_factor: 扩充倍数 (新样本数 = 原样本数 × (augment_factor - 1))
+            sampling_strategy: 采样策略 ('grid', 'random', 'adaptive')
+            **kriging_params: Kriging参数
+            
+        Returns:
+            augmented_points: 扩充后的坐标 (N+M, 3)
+            augmented_values: 扩充后的数值 (N+M,)
+        """
+        # 训练Kriging模型
+        self.kriging_adapter.fit(train_points, train_values, **kriging_params)
+        
+        # 生成ROI内的新采样点
+        n_original = len(train_points) 
+        n_new = int(n_original * (augment_factor - 1.0))
+        
+        if n_new <= 0:
+            warnings.warn("扩充倍数太小，没有生成新样本")
+            return train_points, train_values
+        
+        # 根据策略生成新采样点
+        new_points = self._generate_sampling_points(
+            roi_bounds, n_new, sampling_strategy, train_points
+        )
+        
+        # 使用Kriging预测新点的数值
+        new_values = self.kriging_adapter.predict(new_points, return_std=False)
+        
+        # 合并原始和新生成的样本
+        augmented_points = np.vstack([train_points, new_points])
+        augmented_values = np.concatenate([train_values, new_values])
+        
+        if self.config.verbose:
+            print(f"样本扩充完成: {n_original} → {len(augmented_points)} 个样本")
+            print(f"新样本数值范围: [{np.min(new_values):.4e}, {np.max(new_values):.4e}]")
+        
+        return augmented_points, augmented_values
+    
+    def _generate_sampling_points(self,
+                                roi_bounds: Dict[str, np.ndarray], 
+                                n_points: int,
+                                strategy: str,
+                                existing_points: np.ndarray) -> np.ndarray:
+        """在ROI内生成采样点"""
+        roi_min = roi_bounds['min']
+        roi_max = roi_bounds['max']
+        
+        if strategy == 'grid':
+            return self._generate_grid_points(roi_min, roi_max, n_points)
+        elif strategy == 'random':
+            return self._generate_random_points(roi_min, roi_max, n_points)
+        elif strategy == 'adaptive':
+            return self._generate_adaptive_points(roi_min, roi_max, n_points, existing_points)
+        else:
+            raise ValueError(f"不支持的采样策略: {strategy}")
+    
+    def _generate_grid_points(self, roi_min: np.ndarray, roi_max: np.ndarray, n_points: int) -> np.ndarray:
+        """生成规则网格点"""
+        # 计算每个维度的点数（尽量接近立方体）
+        points_per_dim = int(np.ceil(n_points ** (1/3)))
+        
+        x = np.linspace(roi_min[0], roi_max[0], points_per_dim)
+        y = np.linspace(roi_min[1], roi_max[1], points_per_dim)
+        z = np.linspace(roi_min[2], roi_max[2], points_per_dim)
+        
+        X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
+        grid_points = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1)
+        
+        # 如果生成的点数超过需要的数量，随机选择
+        if len(grid_points) > n_points:
+            indices = np.random.choice(len(grid_points), n_points, replace=False)
+            grid_points = grid_points[indices]
+        
+        return grid_points
+    
+    def _generate_random_points(self, roi_min: np.ndarray, roi_max: np.ndarray, n_points: int) -> np.ndarray:
+        """生成随机采样点"""
+        random_points = np.random.rand(n_points, 3)
+        random_points = roi_min + random_points * (roi_max - roi_min)
+        return random_points
+    
+    def _generate_adaptive_points(self, roi_min: np.ndarray, roi_max: np.ndarray, 
+                                n_points: int, existing_points: np.ndarray) -> np.ndarray:
+        """生成自适应采样点（避开已有点密集区域）"""
+        from scipy.spatial import cKDTree
+        
+        # 构建已有点的KD树
+        tree = cKDTree(existing_points)
+        
+        # 生成候选点（比需要的多一些）
+        n_candidates = n_points * 3
+        candidate_points = self._generate_random_points(roi_min, roi_max, n_candidates)
+        
+        # 计算每个候选点到最近已有点的距离
+        distances, _ = tree.query(candidate_points)
+        
+        # 选择距离较大的点（远离已有点）
+        sorted_indices = np.argsort(distances)[::-1]  # 降序排列
+        selected_indices = sorted_indices[:n_points]
+        
+        return candidate_points[selected_indices]
+
+# ==================== 端到端耦合工作流 ====================
+# End-to-end coupling workflows
+
+class CouplingWorkflow:
+    """
+    耦合工作流管理器
+    Coupling workflow manager
+    """
+    
+    def __init__(self, config: ComposeConfig = None):
+        self.config = config or ComposeConfig()
+        self.mode1_tools = {
+            'residual_kriging': Mode1ResidualKriging(config),
+            'fusion': Mode1Fusion()
+        }
+        self.mode2_tools = {
+            'roi_detector': Mode2ROIDetector(),
+            'augmentor': Mode2SampleAugmentor(config)
+        }
+        self.pinn_adapter = PINNAdapter(config)
+        
+    def run_mode1_pipeline(self,
+                          train_points: np.ndarray,
+                          train_values: np.ndarray,
+                          prediction_points: np.ndarray,
+                          fusion_weight: Optional[float] = None,
+                          **kwargs) -> Dict[str, Any]:
+        """
+        执行方案1完整流程: PINN → 残差Kriging → 加权融合
+        Execute Mode 1 complete pipeline
+        """
+        if fusion_weight is None:
+            fusion_weight = self.config.fusion_weight
+            
+        results = {}
+        
+        # 步骤1: 训练PINN
+        print("🔥 步骤1: 训练PINN模型...")
+        self.pinn_adapter.fit(train_points, train_values, **kwargs)
+        
+        # 步骤2: PINN预测
+        print("🔮 步骤2: PINN全场预测...")
+        pinn_train_pred = self.pinn_adapter.predict(train_points)
+        pinn_field_pred = self.pinn_adapter.predict(prediction_points)
+        results['pinn_predictions'] = pinn_field_pred
+        
+        # 步骤3: 残差Kriging
+        print("⚡ 步骤3: 残差Kriging插值...")
+        residual_pred, residual_std = self.mode1_tools['residual_kriging'].residual_kriging(
+            train_points, train_values, pinn_train_pred, prediction_points,
+            return_uncertainty=True, **kwargs.get('kriging_params', {})
+        )
+        results['residual_predictions'] = residual_pred
+        results['residual_std'] = residual_std
+        
+        # 步骤4: 加权融合
+        print("🔗 步骤4: 加权融合...")
+        if residual_std is not None and not np.all(residual_std == 0):
+            fused_pred, confidence_bounds = self.mode1_tools['fusion'].fuse_residual(
+                pinn_field_pred, residual_pred, fusion_weight, residual_std
+            )
+            results['confidence_bounds'] = confidence_bounds
+        else:
+            fused_pred = self.mode1_tools['fusion'].fuse_residual(
+                pinn_field_pred, residual_pred, fusion_weight
+            )
+            results['confidence_bounds'] = None
+            
+        results['final_predictions'] = fused_pred
+        results['fusion_weight'] = fusion_weight
+        
+        print("✅ 方案1流程完成!")
+        return results
+    
+    def run_mode2_pipeline(self,
+                          train_points: np.ndarray, 
+                          train_values: np.ndarray,
+                          prediction_points: np.ndarray,
+                          roi_strategy: Optional[str] = None,
+                          augment_factor: Optional[float] = None,
+                          **kwargs) -> Dict[str, Any]:
+        """
+        执行方案2完整流程: Kriging ROI样本扩充 → PINN重训练
+        Execute Mode 2 complete pipeline  
+        """
+        if roi_strategy is None:
+            roi_strategy = self.config.roi_detection_strategy
+        if augment_factor is None:
+            augment_factor = self.config.sample_augment_factor
+            
+        results = {}
+        
+        # 步骤1: ROI检测
+        print("🎯 步骤1: 检测感兴趣区域(ROI)...")
+        roi_bounds = self.mode2_tools['roi_detector'].detect_roi(
+            train_points, train_values, roi_strategy, **kwargs.get('roi_params', {})
+        )
+        results['roi_bounds'] = roi_bounds
+        
+        # 步骤2: Kriging样本扩充
+        print("📈 步骤2: Kriging样本扩充...")
+        augmented_points, augmented_values = self.mode2_tools['augmentor'].augment_by_kriging(
+            train_points, train_values, roi_bounds, augment_factor,
+            **kwargs.get('kriging_params', {})
+        )
+        results['augmented_points'] = augmented_points
+        results['augmented_values'] = augmented_values
+        
+        # 步骤3: 用扩充数据重新训练PINN
+        print("🔥 步骤3: 用扩充数据重新训练PINN...")
+        enhanced_pinn = PINNAdapter(self.config)
+        enhanced_pinn.fit(augmented_points, augmented_values, **kwargs)
+        
+        # 步骤4: 最终预测
+        print("🔮 步骤4: 增强PINN全场预测...")
+        final_pred = enhanced_pinn.predict(prediction_points)
+        results['final_predictions'] = final_pred
+        results['enhanced_pinn'] = enhanced_pinn
+        
+        print("✅ 方案2流程完成!")
+        return results
+
+def print_compose_banner():
+    """打印项目横幅"""
+    banner = """
+    ╔══════════════════════════════════════════════════════════════╗
+    ║         GPU Block-Kriging × PINN 耦合重建工具模块            ║  
+    ║        GPU-Accelerated Block Kriging × PINN Coupling        ║
+    ║                                                              ║
+    ║  🚀 方案1: PINN → 残差Kriging → 加权融合                     ║
+    ║  🎯 方案2: Kriging ROI样本扩充 → PINN重训练                  ║  
+    ║                                                              ║
+    ║  💡 支持GPU加速 | 🔬 物理约束 | 📊 不确定度量化              ║
+    ╚══════════════════════════════════════════════════════════════╝
+    """
+    print(banner)
+
+if __name__ == "__main__":
+    print_compose_banner()
+    validate_compose_environment() 
