@@ -1,0 +1,12 @@
+# 忽略所有 .pkl 文件
+*.pkl
+
+# 忽略所有 .xlsx 文件
+*.xlsx
+
+# 忽略 Python 缓存目录
+__pycache__/
+
+# 忽略编译生成的 .pyc/.pyo 等文件
+*.py[cod]
+*.pyo
