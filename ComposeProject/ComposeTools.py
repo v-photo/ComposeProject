@@ -23,6 +23,128 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+# ==================== 从新版PINN项目迁移的数据处理工具 ====================
+
+class RadiationDataProcessor:
+    """
+    Enhanced data processor for radiation field data
+    Supports multiple input formats including {z: DataFrame[y, x]} from tool.py
+    """
+    
+    def __init__(self, space_dims=None, world_bounds=None):
+        """
+        Initialize the data processor
+        
+        Args:
+            space_dims: Physical dimensions [x, y, z] in meters
+            world_bounds: Dict with 'min' and 'max' arrays, or None for auto-detection
+        """
+        self.space_dims = np.array(space_dims) if space_dims is not None else None
+        self.world_bounds = world_bounds
+        self.dose_data = None
+        
+    def load_from_dict(self, data_dict: Dict, space_dims=None, world_bounds=None):
+        """
+        Load radiation data from dictionary format {z: DataFrame[y, x]} or {z: numpy_array}
+        Compatible with tool.py RadiationDataset format
+        
+        Args:
+            data_dict: Dictionary where keys are z-coordinates and values are 2D data (DataFrame or numpy array)
+            space_dims: Physical dimensions [x, y, z] in meters
+            world_bounds: Physical bounds dict with 'min' and 'max' keys
+            
+        Returns:
+            dict: Standardized dose_data format for PINN usage
+        """
+        print("Loading radiation data from dictionary format...")
+        
+        z_coords = sorted(data_dict.keys())
+        first_layer = data_dict[z_coords[0]]
+        
+        if hasattr(first_layer, 'values'):
+            first_array = first_layer.values
+        else:
+            first_array = np.array(first_layer)
+        
+        y_size, x_size = first_array.shape
+        z_size = len(z_coords)
+        
+        dose_grid = np.zeros((x_size, y_size, z_size), dtype=np.float32)
+        
+        for z_idx, z_coord in enumerate(z_coords):
+            layer_data = data_dict[z_coord]
+            layer_array = layer_data.values if hasattr(layer_data, 'values') else np.array(layer_data)
+            dose_grid[:, :, z_idx] = layer_array.T.astype(np.float32)
+        
+        if space_dims is not None:
+            self.space_dims = np.array(space_dims, dtype=np.float32)
+        elif self.space_dims is None:
+            self.space_dims = np.array([20.0, 10.0, 10.0], dtype=np.float32)
+        
+        if world_bounds is not None:
+            self.world_bounds = world_bounds
+            world_min = np.array(world_bounds['min'], dtype=np.float32)
+            world_max = np.array(world_bounds['max'], dtype=np.float32)
+        elif self.world_bounds is not None:
+            world_min = np.array(self.world_bounds['min'], dtype=np.float32)
+            world_max = np.array(self.world_bounds['max'], dtype=np.float32)
+        else:
+            world_min = -self.space_dims / 2.0
+            world_max = self.space_dims / 2.0
+        
+        grid_shape = np.array([x_size, y_size, z_size])
+        voxel_size = (world_max - world_min) / grid_shape
+        
+        self.dose_data = {
+            'dose_grid': dose_grid, 'world_min': world_min, 'world_max': world_max,
+            'voxel_size': voxel_size, 'grid_shape': grid_shape, 'space_dims': self.space_dims,
+            'z_coords': np.array(z_coords, dtype=np.float32), 'original_data_dict': data_dict
+        }
+        return self.dose_data
+
+    def load_from_numpy(self, dose_array, space_dims, world_bounds=None):
+        """
+        Load radiation data from 3D numpy array
+        """
+        if dose_array.ndim != 3:
+            raise ValueError(f"Expected 3D array, got {dose_array.ndim}D")
+        
+        self.space_dims = np.array(space_dims, dtype=np.float32)
+        grid_shape = np.array(dose_array.shape)
+        
+        if world_bounds is not None:
+            world_min = np.array(world_bounds['min'], dtype=np.float32)
+            world_max = np.array(world_bounds['max'], dtype=np.float32)
+        else:
+            world_min = -self.space_dims / 2.0
+            world_max = self.space_dims / 2.0
+        
+        voxel_size = (world_max - world_min) / grid_shape
+        
+        self.dose_data = {
+            'dose_grid': dose_array.astype(np.float32), 'world_min': world_min, 'world_max': world_max,
+            'voxel_size': voxel_size, 'grid_shape': grid_shape, 'space_dims': self.space_dims
+        }
+        return self.dose_data
+
+    def get_dose_data(self):
+        if self.dose_data is None:
+            raise ValueError("No data loaded.")
+        return self.dose_data
+
+class DataLoader:
+    @staticmethod
+    def load_dose_from_dict(data_dict: Dict, space_dims=None, world_bounds=None):
+        processor = RadiationDataProcessor()
+        return processor.load_from_dict(data_dict, space_dims, world_bounds)
+
+    @staticmethod
+    def load_dose_from_numpy(dose_array, space_dims, world_bounds=None):
+        processor = RadiationDataProcessor()
+        return processor.load_from_numpy(dose_array, space_dims, world_bounds)
+
+# ==================== 耦合项目原有工具和模块导入 ====================
+
 # 尝试导入所需的第三方库
 try:
     import torch
@@ -39,13 +161,12 @@ except ImportError:
     warnings.warn("CuPy不可用，GPU加速功能将被禁用")
 
 # 导入现有模块 - 需要确保路径正确
-# Import existing modules - ensure correct paths
 current_dir = Path(__file__).parent
 project_root = current_dir.parent
 
-# 添加Kriging和PINN模块路径
+# 添加Kriging和新的PINN模块路径
 sys.path.insert(0, str(project_root / "Kriging"))
-sys.path.insert(0, str(project_root / "PINN"))
+sys.path.insert(0, str(project_root.parent / "PINN_claude"))
 
 try:
     # 导入Kriging模块
@@ -58,17 +179,16 @@ except ImportError as e:
     warnings.warn(f"Kriging模块导入失败: {e}")
 
 try:
-    # 导入PINN模块
-    from tools import (SimulationConfig, RadiationDataProcessor, DataLoader, 
-                      PINNTrainer, ResultAnalyzer, Visualizer, setup_deepxde_backend)
+    # 导入新的PINN模块
+    from pinn_core import PINNTrainer, setup_deepxde_backend
     # 立即设置DeepXDE后端
     setup_deepxde_backend()
     PINN_AVAILABLE = True
-    print("✅ PINN模块导入成功")
+    print("✅ 新版PINN模块 (pinn_core) 导入成功")
     print("✅ DeepXDE后端已设置为PyTorch")
 except ImportError as e:
     PINN_AVAILABLE = False
-    warnings.warn(f"PINN模块导入失败: {e}")
+    warnings.warn(f"新版PINN模块 (pinn_core) 导入失败: {e}")
 
 # ==================== 全局常量与配置 ====================
 # Global Constants and Configuration
@@ -99,6 +219,7 @@ class ComposeConfig:
     pinn_use_lbfgs: bool = True  # 启用L-BFGS，与PINN子项目对齐
     pinn_loss_weights: List[float] = None  # loss权重，与PINN子项目对齐
     pinn_sampling_strategy: str = 'positive_only'  # 采样策略，与PINN子项目对齐
+    pinn_include_source: bool = False # 是否在PINN模型中包含源项参数化
     
     # 耦合配置 Coupling settings
     fusion_weight: float = 0.5  # 方案1中的权重ω
@@ -738,111 +859,47 @@ class PINNAdapter:
            world_bounds: Dict = None,
            **kwargs) -> 'PINNAdapter':
         """
-        标准化的fit接口
-        
-        Args:
-            X: 训练点坐标 (N, 3)
-            y: 训练点数值 (N,)
-            dose_data: (可选) 包含完整物理信息的dose_data对象
-            space_dims: 物理空间尺寸 [x, y, z]
-            world_bounds: 世界坐标边界
-            **kwargs: 额外的PINN参数
+        根据输入数据和配置，训练或重新训练PINN模型。
+        支持从dose_data自动初始化，或从space_dims/world_bounds手动初始化。
         """
         if not PINN_AVAILABLE:
-            raise RuntimeError("PINN模块不可用")
+            raise RuntimeError("新版PINN (pinn_core) 模块不可用，无法执行fit操作。")
             
-        # 优先使用传入的、真实的 dose_data 对象
-        if dose_data is not None:
-            if self.config.verbose:
-                print("   🔌 使用传入的真实 dose_data 进行PINN初始化")
-            self.dose_data = dose_data
-        else:
-            # 如果没有提供真实的 dose_data（例如，在处理合成数据时），
-            # 则回退到基于边界和虚拟网格的旧方法
-            if self.config.verbose:
-                print("   ⚠️ 未提供真实 dose_data，将创建虚拟网格进行PINN初始化。")
-            
-            processor = RadiationDataProcessor(space_dims, world_bounds)
-            grid_shape = (10, 10, 10)  # 最小网格用于初始化
-            dummy_grid = np.zeros(grid_shape)
-            self.dose_data = processor.load_from_numpy(dummy_grid, space_dims, world_bounds)
-        
-        # 创建PINN训练器 - 与PINN子项目对齐：使用物理参数
-        physical_params = kwargs.get('physical_params', {
-            'rho_material': 1.205,  # 空气密度 kg/m³
-            'mass_energy_abs_coeff': 0.001901  # 质量能量吸收系数 m²/kg
-        })
-        self.trainer = PINNTrainer(physical_params=physical_params)
-        
-        # 数据量控制 - 与PINN子项目对齐：固定使用300个训练点
-        max_training_points = kwargs.get('max_training_points', 300)
-        if len(X) > max_training_points:
-            if self.config.verbose:
-                print(f"⚠️ 训练数据量过大 ({len(X)} 点)，随机采样到 {max_training_points} 点")
-            indices = np.random.choice(len(X), max_training_points, replace=False)
-            X = X[indices]
-            y = y[indices]
-        
-        # 记录数据范围信息用于预测裁剪
-        self.data_max_value = np.max(y) if len(y) > 0 else 1e6
-        
-        # 确保输入数据类型为 float32，这是导致CUDA错误的关键修复
+        # 步骤 1: 用物理参数初始化 PINNTrainer
+        self.trainer = PINNTrainer(physical_params=kwargs.get('physical_params'))
+
+        # 步骤 2: 准备并调用 create_pinn_model
         X = X.astype(np.float32)
         y = y.astype(np.float32)
+        sampled_log_doses_values = np.log(y + EPSILON)
+        network_config = kwargs.get('network_config')
+        
+        self.trainer.create_pinn_model(
+            dose_data=dose_data,
+            sampled_points_xyz=X,
+            sampled_log_doses_values=sampled_log_doses_values,
+            include_source=False,
+            network_config=network_config
+        )
 
-        # 转换输入数据格式 - 与PINN子项目对齐：使用对数变换
-        sampled_log_doses = np.log(y + EPSILON)
-        
-        # 创建PINN模型 - 使用配置中的网络参数，与PINN子项目对齐
-        network_config = kwargs.get('network_config', {
-            'layers': self.config.pinn_network_layers,
-            'activation': 'tanh'
-        })
-        
+        # 步骤 3: 准备并调用 train 方法
+        train_params = {
+            "epochs": self.config.pinn_epochs,
+            "use_lbfgs": self.config.pinn_use_lbfgs,
+            "loss_weights": self.config.pinn_loss_weights,
+            "display_every": 500
+        }
+        train_params.update({k: v for k, v in kwargs.items() if k in ['epochs', 'use_lbfgs', 'loss_weights']})
+
         try:
-            self.trainer.create_pinn_model(
-                dose_data=self.dose_data,
-                sampled_points_xyz=X,
-                sampled_log_doses_values=sampled_log_doses,
-                include_source=kwargs.get('include_source', False),
-                network_config=network_config
-            )
-            
-            # 训练模型 - 使用配置参数，与PINN子项目对齐
-            epochs = kwargs.get('epochs', self.config.pinn_epochs)
-            loss_weights = kwargs.get('loss_weights', self.config.pinn_loss_weights)
-            use_lbfgs = kwargs.get('use_lbfgs', self.config.pinn_use_lbfgs)
-            
-            # ====== 强制CPU训练修复CUDA问题 ======
-            original_gpu_setting = self.config.gpu_enabled
-            if 'CUDA error' in str(kwargs.get('force_cpu', '')):
-                if self.config.verbose:
-                    print("🔧 检测到CUDA问题，强制使用CPU训练")
-                import torch
-                torch.set_default_device('cpu')
-                self.config.gpu_enabled = False
-            
-            if self.config.verbose:
-                print(f"🏋️ 开始PINN训练 - 轮数: {epochs}, L-BFGS: {use_lbfgs}, 权重: {loss_weights}")
-            
-            self.trainer.train(
-                epochs=epochs,
-                use_lbfgs=use_lbfgs,  # 使用配置中的L-BFGS设置
-                loss_weights=loss_weights,
-                display_every=kwargs.get('display_every', max(100, epochs//20))  # 动态调整显示频率
-            )
-            
-            # 恢复原始GPU设置
-            self.config.gpu_enabled = original_gpu_setting
-            
-            self.is_fitted = True
-            return self
-            
+            self.trainer.train(**train_params)
+            self.trained = True
         except Exception as e:
-            if self.config.verbose:
-                print(f"❌ PINN训练失败: {e}")
-            raise
-        
+            print(f"❌ PINN训练失败: {e}")
+            raise e
+            
+        return self
+
     def predict(self, X: np.ndarray, **kwargs) -> np.ndarray:
         """
         标准化的predict接口

@@ -25,10 +25,10 @@ from pykrige.core import (
 from pykrige.ok3d import OrdinaryKriging3D
 from pykrige.compat_gstools import validate_gstools
 
-import pycuda.autoinit
-import pycuda.driver as cuda
-import pycuda.gpuarray as gpuarray
-from pycuda.compiler import SourceModule
+# import pycuda.autoinit  # <--- [删除] 强制初始化，导致问题
+# import pycuda.driver as cuda # <--- [删除]
+# import pycuda.gpuarray as gpuarray # <--- [删除]
+# from pycuda.compiler import SourceModule # <--- [删除]
 # 使用代码之前还有一些额外操作
 
 
@@ -225,6 +225,11 @@ __global__ void calc_distances2(float *d_X, float *d_coords, float *d_d, float *
 }
 """
 def calc_d_bd_gpu(X, coords, calc_distance_gpuDim : int):
+    # [新增] 将pycuda的导入和初始化移到函数内部，实现按需加载
+    import pycuda.autoinit
+    import pycuda.driver as cuda
+    import pycuda.gpuarray as gpuarray
+    from pycuda.compiler import SourceModule
 
     n_sample, n_dim = X.shape
 
