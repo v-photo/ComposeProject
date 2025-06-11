@@ -25,11 +25,6 @@ from pathlib import Path
 import pickle
 
 # ==================== 耦合项目原有工具和模块导入 ====================
-from PINN.pinn_core import SimulationConfig, PINNTrainer, ResultAnalyzer
-from PINN.data_processing import DataLoader
-from PINN.visualization import Visualizer # <--- 修改这里
-from PINN.tools import setup_deepxde_backend
-from PINN.dataAnalysis import get_data
 
 # 尝试导入所需的第三方库
 try:
@@ -62,21 +57,6 @@ try:
 except ImportError as e:
     KRIGING_AVAILABLE = False
     warnings.warn(f"Kriging模块导入失败: {e}")
-
-# 添加PINN模块路径
-sys.path.insert(0, str(project_root / "PINN"))
-try:
-    # 导入PINN核心模块
-    from pinn_core import PINNTrainer, SimulationConfig, ResultAnalyzer
-    from data_processing import DataLoader
-    from visualization import Visualizer
-    from tools import setup_deepxde_backend
-    from dataAnalysis import get_data
-    PINN_AVAILABLE = True
-    print("✅ PINN模块导入成功")
-except ImportError as e:
-    PINN_AVAILABLE = False
-    warnings.warn(f"PINN模块导入失败: {e}")
 
 # ==================== 全局常量与配置 ====================
 # Global Constants and Configuration
@@ -711,73 +691,6 @@ class KrigingAdapter:
                 return predictions, np.zeros_like(predictions)
         else:
             return predictions
-
-class PINNAdapter:
-    """
-    PINN模型的标准化接口适配器
-    Standardized interface adapter for the PINN model
-    """
-    
-    def __init__(self, physical_params: Dict, config: ComposeConfig = None):
-        """
-        初始化PINN适配器
-        """
-        self.config = config or ComposeConfig()
-        if not PINN_AVAILABLE:
-            raise RuntimeError("PINN模块不可用，无法创建PINNAdapter")
-        if not physical_params:
-            raise ValueError("PINNAdapter需要一个包含物理参数的字典 'physical_params'")
-        
-        self.trainer = PINNTrainer(physical_params=physical_params)
-        self.is_fitted = False
-
-    def fit(self, 
-            dose_data: Dict, 
-            sampled_points_xyz: np.ndarray, 
-            sampled_log_doses_values: np.ndarray,
-            **kwargs) -> 'PINNAdapter':
-        """
-        使用提供的采样点训练PINN模型。
-        """
-        print("INFO: 开始PINNAdapter.fit()")
-        
-        network_config = kwargs.get('network_config', {'layers': [3] + [32] * 4 + [1], 'activation': 'tanh'})
-        include_source = kwargs.get('include_source', False)
-        
-        self.trainer.create_pinn_model(
-            dose_data=dose_data,
-            sampled_points_xyz=sampled_points_xyz,
-            sampled_log_doses_values=sampled_log_doses_values,
-            include_source=include_source,
-            network_config=network_config
-        )
-        
-        epochs = kwargs.get('epochs', 10000)
-        use_lbfgs = kwargs.get('use_lbfgs', True)
-        loss_weights = kwargs.get('loss_weights', [1, 100])
-        
-        self.trainer.train(
-            epochs=epochs, 
-            use_lbfgs=use_lbfgs, 
-            loss_weights=loss_weights
-        )
-        
-        self.is_fitted = True
-        print("INFO: PINNAdapter.fit() 完成")
-        return self
-
-    def predict(self, prediction_points: np.ndarray) -> np.ndarray:
-        """
-        使用训练好的PINN模型进行预测。
-        根据约定，此方法直接返回最终的物理剂量值(线性尺度)。
-        """
-        if not self.is_fitted:
-            raise RuntimeError("PINN模型尚未训练，请先调用fit()")
-            
-        # 根据约定，trainer.predict()返回的就是最终的物理剂量
-        predicted_doses = self.trainer.predict(prediction_points)
-        
-        return predicted_doses.reshape(-1, 1)
 
 def validate_compose_environment() -> Dict[str, bool]:
     """
