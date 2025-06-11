@@ -334,16 +334,47 @@ class PINNTrainer:
         val = variable.detach().cpu().numpy()
         return val.item() if val.ndim == 0 else val[0]
     
-    def predict(self, prediction_points):
-        """Make predictions using the trained model"""
+    def predict(self, prediction_points, batch_size=100000):
+        """
+        Predict dose values at given points, with batching to avoid memory issues.
+        
+        Args:
+            prediction_points: Numpy array of points to predict (N, 3)
+            batch_size: Number of points to predict in each batch
+        
+        Returns:
+            Numpy array of predicted dose values (N,)
+        """
         if self.model is None:
-            raise ValueError("Model not trained yet. Call train() first.")
+            raise ValueError("Model is not created. Call create_pinn_model first.")
         
-        log_dose_pinn = self.model.predict(prediction_points)
-        dose_pinn = np.exp(log_dose_pinn[:, 0])
-        dose_pinn[dose_pinn < EPSILON] = EPSILON
+        n_points = prediction_points.shape[0]
+        if n_points == 0:
+            return np.array([])
+            
+        print(f"开始预测 {n_points} 个点 (批大小: {batch_size})...")
         
-        return dose_pinn
+        # 逐批次进行预测
+        predictions = []
+        for i in range(0, n_points, batch_size):
+            batch_points = prediction_points[i:i+batch_size, :]
+            
+            # 预测的是对数剂量
+            log_dose_pred_batch = self.model.predict(batch_points)
+            
+            # 转换回物理剂量
+            dose_pred_batch = np.exp(log_dose_pred_batch)
+            predictions.append(dose_pred_batch)
+            
+            # 打印进度
+            print(f"  - 已完成 {min(i + batch_size, n_points)} / {n_points}...", end='\r')
+
+        print("\n✅ 预测完成。")
+        
+        # 将所有批次结果合并
+        predicted_doses = np.vstack(predictions)
+        
+        return predicted_doses.flatten()
     
     def get_learned_parameters(self):
         """Get the learned parameters"""

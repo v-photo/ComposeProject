@@ -22,7 +22,8 @@ def main():
     print(f"当前工作目录: {os.getcwd()}")
     print(f"Python 路径: {sys.path}")
     
-    run_pinn_benchmark(epochs=2000, show_plots=True)
+    # 由于测试环境可能没有GUI，将 show_plots 设置为 False
+    run_pinn_benchmark(epochs=2000, show_plots=False)
 
 
 if __name__ == "__main__":
