@@ -1,4 +1,5 @@
 import sys
+print("--- SCRIPT START ---")
 import os
 import argparse
 import numpy as np
@@ -72,10 +73,23 @@ def main(args):
     print(f"✅ 成功采样 {len(train_points)} 个训练点。")
 
     # 准备全场预测点
-    grid_shape = dose_data['dose_grid'].shape
-    pred_x = dose_data['world_min'][0] + (np.arange(grid_shape[0]) + 0.5) * dose_data['voxel_size'][0]
-    pred_y = dose_data['world_min'][1] + (np.arange(grid_shape[1]) + 0.5) * dose_data['voxel_size'][1]
-    pred_z = dose_data['world_min'][2] + (np.arange(grid_shape[2]) + 0.5) * dose_data['voxel_size'][2]
+    original_grid_shape = np.array(dose_data['dose_grid'].shape)
+    if args.downsample > 1:
+        print(f"⚠️ 警告: 预测网格将通过系数 {args.downsample} 进行降采样以加速调试。")
+        step = int(args.downsample)
+        pred_x_indices = np.arange(0, original_grid_shape[0], step)
+        pred_y_indices = np.arange(0, original_grid_shape[1], step)
+        pred_z_indices = np.arange(0, original_grid_shape[2], step)
+        grid_shape = (len(pred_x_indices), len(pred_y_indices), len(pred_z_indices))
+    else:
+        pred_x_indices = np.arange(original_grid_shape[0])
+        pred_y_indices = np.arange(original_grid_shape[1])
+        pred_z_indices = np.arange(original_grid_shape[2])
+        grid_shape = original_grid_shape
+
+    pred_x = dose_data['world_min'][0] + (pred_x_indices + 0.5) * dose_data['voxel_size'][0]
+    pred_y = dose_data['world_min'][1] + (pred_y_indices + 0.5) * dose_data['voxel_size'][1]
+    pred_z = dose_data['world_min'][2] + (pred_z_indices + 0.5) * dose_data['voxel_size'][2]
     XX, YY, ZZ = np.meshgrid(pred_x, pred_y, pred_z, indexing='ij')
     prediction_points = np.vstack([XX.ravel(), YY.ravel(), ZZ.ravel()]).T
 
@@ -116,7 +130,13 @@ def main(args):
     print(f"\n" + "="*25 + " 步骤3: 结果评估 " + "="*25)
     final_predictions = results.get('final_predictions')
     if final_predictions is not None:
-        true_values_full = dose_data['dose_grid'].flatten()
+        if args.downsample > 1:
+            # 通过索引从原始网格获取降采样后的真值
+            true_field_for_plot = dose_data['dose_grid'][np.ix_(pred_x_indices, pred_y_indices, pred_z_indices)]
+            true_values_full = true_field_for_plot.flatten()
+        else:
+            true_values_full = dose_data['dose_grid'].flatten()
+            true_field_for_plot = dose_data['dose_grid']
         
         metrics = MetricsCalculator.compute_metrics(true_values_full, final_predictions)
         print("📊 全场预测评估指标:")
@@ -124,10 +144,14 @@ def main(args):
             print(f"  - {name}: {value:.4f}")
         
         # 可视化
+        uncertainty_field = results.get('confidence_bounds')
+        if uncertainty_field is not None:
+            uncertainty_field = uncertainty_field.reshape(grid_shape)
+
         VisualizationTools.plot_comparison_2d_slice(
-            true_field=dose_data['dose_grid'],
-            pred_field=final_predictions.reshape(dose_data['dose_grid'].shape),
-            uncertainty_field=results.get('confidence_bounds'),
+            true_field=true_field_for_plot,
+            pred_field=final_predictions.reshape(grid_shape),
+            uncertainty_field=uncertainty_field,
             save_path=f"mode_{args.mode}_result.png",
             title_prefix=f"方案 {args.mode} "
         )
@@ -139,14 +163,17 @@ def main(args):
     print("\n========================= 步骤4: 可视化 =========================")
     if final_predictions is not None:
         # 准备用于可视化的三维网格数据
-        true_field_grid = dose_data['dose_grid']
-        final_pred_grid = final_predictions.reshape(true_field_grid.shape)
+        if args.downsample > 1:
+            true_field_grid = true_field_for_plot
+        else:
+            true_field_grid = dose_data['dose_grid']
+        final_pred_grid = final_predictions.reshape(grid_shape)
         
         # 如果有不确定度数据，也将其转换为网格
         uncertainty_grid = None
         if results.get('confidence_bounds') is not None:
             print("正在处理不确定度数据以进行可视化...")
-            uncertainty_grid = results['confidence_bounds'].reshape(true_field_grid.shape)
+            uncertainty_grid = results['confidence_bounds'].reshape(grid_shape)
 
         print("生成对比图...")
         VisualizationTools.plot_comparison_2d_slice(
@@ -170,6 +197,8 @@ if __name__ == "__main__":
                         help="用于初始训练的采样点数量")
     parser.add_argument('--pinn_epochs', type=int, default=5000,
                         help="PINN训练的周期数")
+    parser.add_argument('--downsample', type=int, default=1,
+                        help="全场预测网格的降采样系数(>1)，用于加速调试。")
     parser.add_argument('--seed', type=int, default=42,
                         help="随机种子，以确保结果可复现")
     

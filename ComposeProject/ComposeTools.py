@@ -104,121 +104,7 @@ class ComposeConfig:
     roi_detection_strategy: str = 'high_density'  # 方案2中的ROI检测策略
     sample_augment_factor: float = 2.0  # 方案2中的样本扩充倍数
     
-
 # ==================== 通用工具 (Common Tools) ====================
-
-@dataclass
-class FieldTensor:
-    """
-    标准化的场数据结构
-    Standardized field data structure
-    """
-    coordinates: np.ndarray  # (N, 3) - xyz坐标
-    values: np.ndarray      # (N,) - 场值
-    uncertainties: Optional[np.ndarray] = None  # (N,) - 不确定度
-    metadata: Optional[Dict[str, Any]] = None   # 元数据
-    
-    def __post_init__(self):
-        """验证数据一致性 Validate data consistency"""
-        if self.coordinates.shape[0] != self.values.shape[0]:
-            raise ValueError("坐标和数值的数量不匹配")
-        if self.coordinates.shape[1] != 3:
-            raise ValueError("坐标必须是3维 (x, y, z)")
-        if self.uncertainties is not None and self.uncertainties.shape[0] != self.values.shape[0]:
-            raise ValueError("不确定度和数值的数量不匹配")
-
-@dataclass 
-class ProbeSet:
-    """
-    标准化的测点数据结构
-    Standardized probe data structure
-    """
-    positions: np.ndarray   # (N, 3) - 测点坐标
-    measurements: np.ndarray # (N,) - 测量值
-    weights: Optional[np.ndarray] = None  # (N,) - 权重
-    metadata: Optional[Dict[str, Any]] = None
-    
-    def __post_init__(self):
-        """验证数据一致性"""
-        if self.positions.shape[0] != self.measurements.shape[0]:
-            raise ValueError("测点位置和测量值的数量不匹配")
-        if self.positions.shape[1] != 3:
-            raise ValueError("测点位置必须是3维 (x, y, z)")
-        if self.weights is not None and self.weights.shape[0] != self.measurements.shape[0]:
-            raise ValueError("权重和测量值的数量不匹配")
-
-class DataNormalizer:
-    """
-    数据归一化工具
-    Data normalization utilities
-    """
-    
-    @staticmethod
-    def normalize_tensor_to_grid(field_tensor: FieldTensor, 
-                               grid_shape: Tuple[int, int, int],
-                               world_bounds: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
-        """
-        将张量数据转换为网格格式
-        Convert tensor data to grid format
-        
-        Args:
-            field_tensor: 输入的场数据张量
-            grid_shape: 目标网格形状 (nx, ny, nz)
-            world_bounds: 世界坐标边界 {'min': [x,y,z], 'max': [x,y,z]}
-            
-        Returns:
-            Dict包含 'grid', 'coordinates', 'bounds'
-        """
-        coordinates = field_tensor.coordinates
-        values = field_tensor.values
-        
-        world_min = world_bounds['min']
-        world_max = world_bounds['max']
-        
-        # 创建规则网格
-        x_grid = np.linspace(world_min[0], world_max[0], grid_shape[0])
-        y_grid = np.linspace(world_min[1], world_max[1], grid_shape[1])  
-        z_grid = np.linspace(world_min[2], world_max[2], grid_shape[2])
-        
-        X, Y, Z = np.meshgrid(x_grid, y_grid, z_grid, indexing='ij')
-        grid_coords = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1)
-        
-        # 使用最近邻插值将不规则数据映射到网格
-        from scipy.spatial import cKDTree
-        tree = cKDTree(coordinates)
-        distances, indices = tree.query(grid_coords)
-        
-        grid_values = values[indices].reshape(grid_shape)
-        
-        return {
-            'grid': grid_values,
-            'coordinates': grid_coords.reshape((*grid_shape, 3)),
-            'bounds': world_bounds,
-            'interpolation_distances': distances.reshape(grid_shape)
-        }
-    
-    @staticmethod
-    def robust_normalize(data: np.ndarray, 
-                        quantile_range: Tuple[float, float] = (0.01, 0.99)) -> Tuple[np.ndarray, Dict]:
-        """
-        鲁棒归一化 (基于分位数)
-        Robust normalization based on quantiles
-        """
-        q_low, q_high = quantile_range
-        low_val = np.quantile(data, q_low)
-        high_val = np.quantile(data, q_high)
-        
-        normalized = np.clip((data - low_val) / (high_val - low_val + EPSILON), 0, 1)
-        
-        normalization_info = {
-            'method': 'robust',
-            'low_val': low_val,
-            'high_val': high_val,
-            'quantile_range': quantile_range
-        }
-        
-        return normalized, normalization_info
-
 class MetricsCalculator:
     """
     误差统计计算器
@@ -599,7 +485,6 @@ PINN预测性能详细分析:
         return fig
 
 # ==================== 模型适配器 (Model Adapters) ====================
-
 class KrigingAdapter:
     """
     Kriging模块的标准化接口适配器
@@ -734,65 +619,10 @@ class PINNAdapter:
         self.dose_data = None  # 用于存储加载的数据
         self.is_fitted = False
 
-    def fit(self,
-            data_path: str,
-            space_dims: List[float],
-            num_samples: int,
-            sampling_strategy: str = 'positive_only',
-            **kwargs) -> 'PINNAdapter':
-        """
-        从数据文件加载、采样并训练PINN模型。
-        这是对 run_pinn_benchmark 中数据处理流程的直接封装。
-        """
-        print("INFO: 开始执行 PINNAdapter.fit()")
-        
-        # 步骤 1: 加载数据 (参照 run_pinn_benchmark)
-        print(f"      - 步骤1: 从 {data_path} 加载数据...")
-        raw_data = get_data(data_path)
-        self.dose_data = DataLoader.load_dose_from_dict(
-            data_dict=raw_data,
-            space_dims=np.array(space_dims)
-        )
-        print("      - 数据加载和预处理完成。")
-
-        # 步骤 2: 采样训练数据 (参照 run_pinn_benchmark)
-        print(f"      - 步骤2: 以 '{sampling_strategy}' 策略采样 {num_samples} 个点...")
-        sampled_xyz, _, sampled_log_doses = DataLoader.sample_training_points(
-            self.dose_data, num_samples=num_samples, sampling_strategy=sampling_strategy
-        )
-        print("      - 训练数据采样完成。")
-
-        # 步骤 3: 创建并训练模型 (原始逻辑)
-        print("      - 步骤3: 创建并训练PINN模型...")
-        network_config = kwargs.get('network_config', {'layers': [3] + [32] * 4 + [1], 'activation': 'tanh'})
-        include_source = kwargs.get('include_source', False)
-        
-        self.trainer.create_pinn_model(
-            dose_data=self.dose_data,
-            sampled_points_xyz=sampled_xyz,
-            sampled_log_doses_values=sampled_log_doses,
-            include_source=include_source,
-            network_config=network_config
-        )
-        
-        epochs = kwargs.get('epochs', 10000)
-        use_lbfgs = kwargs.get('use_lbfgs', True)
-        loss_weights = kwargs.get('loss_weights', [1, 100])
-        
-        self.trainer.train(
-            epochs=epochs, 
-            use_lbfgs=use_lbfgs, 
-            loss_weights=loss_weights
-        )
-        
-        self.is_fitted = True
-        print("INFO: PINNAdapter.fit() 完成")
-        return self
-
     def fit_from_memory(self,
                         train_points: np.ndarray,
                         train_values: np.ndarray,
-                        dose_data: Dict,
+                        dose_data: Dict, 
                         **kwargs) -> 'PINNAdapter':
         """
         使用内存中的训练数据点训练PINN模型。
@@ -868,7 +698,6 @@ def validate_compose_environment() -> Dict[str, bool]:
 
 # ==================== 方案1专用功能 (Mode 1 Specific) ====================
 # PINN → 残差Kriging → 加权融合
-
 class Mode1ResidualKriging:
     """
     方案1: 残差克里金插值专用工具
@@ -1575,120 +1404,6 @@ def print_compose_banner():
     ╚══════════════════════════════════════════════════════════════╝
     """
     print(banner)
-
-def run_pinn_benchmark(epochs=2000, num_samples=300, show_plots=True):
-    """
-    一个完全独立的、用于运行 PINN 子项目基准测试的函数。
-    此函数完整地、原封不动地移植自 PINN/PINNTest.ipynb 中的可执行逻辑，
-    以确保结果的100%可复现性，并从根本上避免任何跨项目的导入问题。
-
-    Args:
-        epochs (int): PINN 训练的周期数。
-        num_samples (int): 用于训练 PINN 的采样点数量。
-        show_plots (bool): 是否显示最终的对比图表。
-
-    Returns:
-        tuple: 包含 (R² 分数, PINN预测结果网格, 真实数据网格) 的元组。
-    """
-    print("\n" + "=" * 70)
-    print(" 开始执行独立的 PINN 基准函数 (run_pinn_benchmark) ".center(70, "="))
-    print("=" * 70)
-
-    # --- 0. 导入与路径设置 (完全本地化) ---
-    # 这部分代码在函数内部执行，以确保其独立性
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-    if project_root not in sys.path:
-        sys.path.insert(0, project_root)
-    
-    # 动态导入所有必要的模块
-    from PINN.pinn_core import SimulationConfig, PINNTrainer, ResultAnalyzer
-    from PINN.data_processing import DataLoader
-    from PINN.visualization import Visualizer # <--- 修改这里
-    from PINN.tools import setup_deepxde_backend
-    from PINN.dataAnalysis import get_data
-    
-    setup_deepxde_backend()
-
-    # --- 1. 定义配置 ---
-    config = SimulationConfig(
-        space_dims=[20.0, 10.0, 10.0], grid_shape=[136, 112, 72],
-        pinn_grid_shape=[136, 112, 72], source_energy_MeV=30.0,
-        n_particles=100000, rho_air_kg_m3=1.205, mass_energy_abs_coeff=1 # <--- V-PHOTO: 修正为 1，与 ipynb 一致
-    )
-
-    # --- 2. 加载数据 ---
-    data_path = os.path.join(project_root, 'PINN', 'DATA.xlsx')
-    data = get_data(data_path)
-    dose_data = DataLoader.load_dose_from_dict(
-        data_dict=data,
-        space_dims=config.SPACE_DIMS_np
-    )
-
-    # --- 3. 采样训练数据 ---
-    sampled_xyz, _, sampled_doses = DataLoader.sample_training_points(
-        dose_data, num_samples=num_samples, sampling_strategy='positive_only'
-    )
-
-    # --- 4. 训练模型 ---
-    physical_params = {'rho_material': config.RHO_AIR_kg_m3, 'mass_energy_abs_coeff': config.MASS_ENERGY_ABS_COEFF_m2_kg}
-    network_config = {'layers': [3] + [32] * 4 + [1], 'activation': 'tanh'}
-    
-    trainer = PINNTrainer(physical_params=physical_params)
-    model = trainer.create_pinn_model(
-        dose_data=dose_data, sampled_points_xyz=sampled_xyz,
-        sampled_doses_values=sampled_doses, include_source=False,
-        network_config=network_config
-    )
-    trainer.train(epochs=10000, use_lbfgs=True, loss_weights=[1, 100])
-
-    # --- 5. 预测 ---
-    grid_shape = config.PINN_GRID_SHAPE_np
-    pred_x = dose_data['world_min'][0] + (np.arange(grid_shape[0]) + 0.5) * dose_data['voxel_size'][0]
-    pred_y = dose_data['world_min'][1] + (np.arange(grid_shape[1]) + 0.5) * dose_data['voxel_size'][1]
-    pred_z = dose_data['world_min'][2] + (np.arange(grid_shape[2]) + 0.5) * dose_data['voxel_size'][2]
-    XX, YY, ZZ = np.meshgrid(pred_x, pred_y, pred_z, indexing='ij')
-    prediction_points = np.vstack([XX.ravel(), YY.ravel(), ZZ.ravel()]).T
-    
-    dose_pred = trainer.predict(prediction_points)
-    predicted_doses_grid = dose_pred.reshape(grid_shape)
-
-    # --- 6. 评估与可视化 ---
-    ground_truth_doses = dose_data['dose_grid']
-    
-    # 使用 ResultAnalyzer 来计算 R²
-    analyzer = ResultAnalyzer()
-    evaluation_results = analyzer.evaluate_predictions(
-        dose_pinn_grid=predicted_doses_grid,
-        dose_mc_data=dose_data,
-        pinn_grid_coords=(pred_x, pred_y, pred_z)
-    )
-    
-    if show_plots:
-        source_pos = dose_data['world_min'] + np.array(np.unravel_index(np.argmax(dose_data['dose_grid']), grid_shape)) * dose_data['voxel_size']
-        slice_idx_z = np.argmin(np.abs(pred_z - source_pos[2]))
-
-        plt.figure(figsize=(14, 6))
-        plt.subplot(1, 2, 1)
-        # 使用 Visualizer.plot_slice
-        Visualizer.plot_slice(
-            grid_coords=(pred_x, pred_y, pred_z), grid_data=predicted_doses_grid,
-            slice_dim='z', slice_idx=slice_idx_z, title=f'PINN 预测 Z切片 (R²={r2:.4f})'
-        )
-        plt.subplot(1, 2, 2)
-        # 使用 Visualizer.plot_slice
-        Visualizer.plot_slice(
-            grid_coords=(pred_x, pred_y, pred_z), grid_data=ground_truth_doses,
-            slice_dim='z', slice_idx=slice_idx_z, title='真实剂量 Z切片'
-        )
-        plt.suptitle("run_pinn_benchmark 函数测试结果")
-        plt.tight_layout(rect=[0, 0, 1, 0.96])
-        plt.show()
-
-    print("=" * 70)
-    print(" PINN 基准函数执行完毕 ".center(70, "="))
-    print("=" * 70)
-    
-    return predicted_doses_grid, ground_truth_doses
 
 if __name__ == "__main__":
     print_compose_banner()

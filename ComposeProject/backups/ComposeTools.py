@@ -81,7 +81,7 @@ except ImportError as e:
 # Global Constants and Configuration
 
 EPSILON = 1e-30  # 数值稳定性常数
-DEFAULT_METRICS = ['MAE', 'RMSE', 'MAPE', 'R2']
+DEFAULT_METRICS = ['MAE', 'RMSE', 'MAPE', 'R2', 'MRE']
 
 @dataclass
 class ComposeConfig:
@@ -255,6 +255,9 @@ class MetricsCalculator:
         
         # 计算残差
         residuals = pred_values - true_values
+        # 平均相对误差 Mean Relative Error
+        if 'MRE' in metrics:
+            results['MRE'] = np.mean(np.abs(residuals / true_values))
         
         # 平均绝对误差 Mean Absolute Error
         if 'MAE' in metrics:
@@ -731,7 +734,7 @@ class PINNAdapter:
         self.dose_data = None  # 用于存储加载的数据
         self.is_fitted = False
 
-    def fit(self,
+    def fit(self, 
             data_path: str,
             space_dims: List[float],
             num_samples: int,
@@ -786,6 +789,49 @@ class PINNAdapter:
         print("INFO: PINNAdapter.fit() 完成")
         return self
 
+    def fit_from_memory(self,
+                        train_points: np.ndarray,
+                        train_values: np.ndarray,
+                        dose_data: Dict, 
+                        **kwargs) -> 'PINNAdapter':
+        """
+        使用内存中的训练数据点训练PINN模型。
+        会自动处理对数转换。此方法专为耦合工作流设计。
+        """
+        print("INFO: 开始执行 PINNAdapter.fit_from_memory()")
+        
+        # 步骤 1: 数据准备 (转换物理值为对数值)
+        print(f"      - 步骤1: 转换 {len(train_values)} 个训练点的物理值为对数值...")
+        sampled_log_doses = np.log(np.maximum(train_values, EPSILON))
+        print("      - 对数转换完成。")
+
+        # 步骤 2: 创建并训练模型
+        print("      - 步骤2: 创建并训练PINN模型...")
+        network_config = kwargs.get('network_config', {'layers': [3] + [32] * 4 + [1], 'activation': 'tanh'})
+        include_source = kwargs.get('include_source', False)
+        
+        self.trainer.create_pinn_model(
+            dose_data=dose_data,
+            sampled_points_xyz=train_points,
+            sampled_log_doses_values=sampled_log_doses,
+            include_source=include_source,
+            network_config=network_config
+        )
+        
+        epochs = kwargs.get('epochs', 10000)
+        use_lbfgs = kwargs.get('use_lbfgs', True)
+        loss_weights = kwargs.get('loss_weights', [1, 100])
+        
+        self.trainer.train(
+            epochs=epochs, 
+            use_lbfgs=use_lbfgs, 
+            loss_weights=loss_weights
+        )
+        
+        self.is_fitted = True
+        print("INFO: PINNAdapter.fit_from_memory() 完成")
+        return self
+
     def predict(self, prediction_points: np.ndarray) -> np.ndarray:
         """
         使用训练好的PINN模型进行预测。
@@ -797,7 +843,7 @@ class PINNAdapter:
         # 根据约定，trainer.predict()返回的就是最终的物理剂量
         predicted_doses = self.trainer.predict(prediction_points)
         
-        return predicted_doses.reshape(-1, 1)
+        return predicted_doses.flatten()
 
 def validate_compose_environment() -> Dict[str, bool]:
     """
@@ -1300,8 +1346,22 @@ class CouplingWorkflow:
     Coupling workflow manager
     """
     
-    def __init__(self, config: ComposeConfig = None):
+    def __init__(self, physical_params: Dict, config: ComposeConfig = None):
+        """
+        初始化工作流管理器
+        Args:
+            physical_params: PINN所需的物理参数字典
+            config: 全局配置
+        """
         self.config = config or ComposeConfig()
+        if not physical_params:
+            raise ValueError("CouplingWorkflow 需要 'physical_params' 来初始化PINN")
+            
+        self.physical_params = physical_params
+        
+        # 为方案1预先创建一个PINN Adapter实例
+        self.pinn_adapter_mode1 = PINNAdapter(physical_params=self.physical_params, config=self.config)
+        
         self.mode1_tools = {
             'residual_kriging': Mode1ResidualKriging(config),
             'fusion': Mode1Fusion()
@@ -1329,21 +1389,19 @@ class CouplingWorkflow:
         
         # 步骤1: 训练PINN
         print("🔥 步骤1: 训练PINN模型...")
-        self.pinn_adapter.fit(
-            train_points, train_values,
-            space_dims=kwargs.get('space_dims'),
-            world_bounds=kwargs.get('world_bounds'),
+        self.pinn_adapter_mode1.fit_from_memory(
+            train_points=train_points, 
+            train_values=train_values,
             dose_data=dose_data,
             epochs=kwargs.get('epochs'),
-            max_training_points=kwargs.get('max_training_points'),
-            loss_weights=self.config.pinn_loss_weights,
-            use_lbfgs=self.config.pinn_use_lbfgs
+            loss_weights=kwargs.get('loss_weights'),
+            use_lbfgs=kwargs.get('use_lbfgs')
         )
         
         # 步骤2: PINN预测
         print("🔮 步骤2: PINN全场预测...")
-        pinn_train_pred = self.pinn_adapter.predict(train_points)
-        pinn_field_pred = self.pinn_adapter.predict(prediction_points)
+        pinn_train_pred = self.pinn_adapter_mode1.predict(train_points)
+        pinn_field_pred = self.pinn_adapter_mode1.predict(prediction_points)
         
         # ==================== 新增：详细PINN误差统计 ====================
         print("\n📊 步骤2.1: PINN误差分析...")
@@ -1484,15 +1542,14 @@ class CouplingWorkflow:
         
         # 步骤3: 用扩充数据重新训练PINN
         print("🔥 步骤3: 用扩充数据重新训练PINN...")
-        enhanced_pinn = PINNAdapter(self.config)
-        enhanced_pinn.fit(
-            augmented_points, augmented_values,
-            space_dims=kwargs.get('space_dims'),
-            world_bounds=kwargs.get('world_bounds'),
+        enhanced_pinn = PINNAdapter(physical_params=self.physical_params, config=self.config)
+        enhanced_pinn.fit_from_memory(
+            train_points=augmented_points, 
+            train_values=augmented_values,
             dose_data=dose_data,
             epochs=kwargs.get('epochs'),
-            loss_weights=self.config.pinn_loss_weights,
-            use_lbfgs=self.config.pinn_use_lbfgs
+            loss_weights=kwargs.get('loss_weights'),
+            use_lbfgs=kwargs.get('use_lbfgs')
         )
         
         # 步骤4: 最终预测
