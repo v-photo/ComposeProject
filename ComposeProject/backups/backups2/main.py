@@ -130,58 +130,25 @@ def main(args):
     
     # ==================== 4. 评估和可视化 ====================
     print(f"\n" + "="*25 + " 步骤3: 结果评估 " + "="*25)
-    
-    # 准备用于评估的真值
-    if args.downsample > 1:
-        true_field_for_eval = dose_data['dose_grid'][np.ix_(pred_x_indices, pred_y_indices, pred_z_indices)]
-        test_values = true_field_for_eval.flatten()
-    else:
-        test_values = dose_data['dose_grid'].flatten()
-
-    # ==================== DEBUG: PINN基线 vs 融合结果性能对比 ====================
-    print("\n" + "#"*20 + " DEBUG: 性能对比测试 " + "#"*20)
-    
-    pinn_predictions = results.get('pinn_predictions')
     final_predictions = results.get('final_predictions')
-
-    if pinn_predictions is not None and final_predictions is not None:
-        print(f"评估点数: {len(test_values)}")
-
-        # 1. 计算PINN基线性能
-        pinn_metrics = MetricsCalculator.compute_metrics(test_values, pinn_predictions)
-        print("\n--- PINN基线性能 (无残差修正) ---")
-        for name, value in pinn_metrics.items():
-            print(f"  - {name}: {value:.6f}")
-
-        # 2. 计算最终融合后性能
-        final_metrics = MetricsCalculator.compute_metrics(test_values, final_predictions)
-        print("\n--- 融合后性能 (PINN + Kriging残差修正) ---")
-        for name, value in final_metrics.items():
-            print(f"  - {name}: {value:.6f}")
-
-        # 3. 计算性能提升
-        print("\n--- 性能提升分析 ---")
-        for metric in pinn_metrics:
-            if metric in final_metrics:
-                pinn_val = pinn_metrics[metric]
-                final_val = final_metrics[metric]
-                
-                # 对于越小越好的指标 (MAE, RMSE, MAPE)
-                if 'MAE' in metric or 'RMSE' in metric or 'MAPE' in metric:
-                    if abs(pinn_val) > 1e-9:
-                        improvement = (pinn_val - final_val) / pinn_val * 100
-                        print(f"  - {metric} 提升: {improvement:+.2f}% (越低越好)")
-                # 对于越大越好的指标 (R2)
-                elif 'R2' in metric:
-                    if abs(pinn_val) > 1e-9:
-                        improvement = (final_val - pinn_val) / abs(pinn_val) * 100
-                        print(f"  - {metric} 提升: {improvement:+.2f}% (越高越好)")
-    else:
-        print("⚠️ 未能获取PINN或最终预测结果，无法进行性能对比。")
-
-    print("#"*20 + " DEBUG: 性能对比结束 " + "#"*20 + "\n")
-    # =======================================================================
+    if final_predictions is not None:
+        if args.downsample > 1:
+            # 通过索引从原始网格获取降采样后的真值
+            true_field_for_plot = dose_data['dose_grid'][np.ix_(pred_x_indices, pred_y_indices, pred_z_indices)]
+            true_values_full = true_field_for_plot.flatten()
+        else:
+            true_values_full = dose_data['dose_grid'].flatten()
         
+        metrics = MetricsCalculator.compute_metrics(true_values_full, final_predictions)
+        print("📊 全场预测评估指标:")
+        for name, value in metrics.items():
+            print(f"  - {name}: {value:.4f}")
+        
+    else:
+        print("⚠️ 工作流未返回最终预测结果，无法进行评估。")
+
+    # ========================= 步骤4: 可视化 (已移除) =========================
+
     print("\n🎉 所有流程执行完毕。")
 
 

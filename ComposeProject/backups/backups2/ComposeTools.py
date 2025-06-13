@@ -827,33 +827,6 @@ class Mode1ResidualKriging:
             else:
                 print("⚠️ Kriging MRE test skipped: All true residual values are close to zero.")
 
-            # --- 新增：真实残差分布分析 ---
-            print("\n" + "--- True Residuals Distribution Analysis ---")
-            zero_count = np.sum(np.isclose(residuals, 0))
-            positive_count = np.sum(residuals > 0)
-            negative_count = np.sum(residuals < 0)
-            print(f"  - Total residuals: {len(residuals)}")
-            print(f"  - Zero values (or close to zero): {zero_count}")
-            print(f"  - Positive values: {positive_count}")
-            print(f"  - Negative values: {negative_count}")
-
-            if positive_count > 0:
-                pos_residuals = residuals[residuals > 0]
-                bins = [0, 1e-2, 1e-1, 1, 10, np.inf]
-                hist, bin_edges = np.histogram(pos_residuals, bins=bins)
-                print("  - Positive residuals breakdown:")
-                for i in range(len(hist)):
-                    print(f"    - Range ({bin_edges[i]:.1e}, {bin_edges[i+1]:.1e}]: {hist[i]} points")
-                    
-            if negative_count > 0:
-                neg_residuals_abs = np.abs(residuals[residuals < 0])
-                bins = [0, 1e-2, 1e-1, 1, 10, np.inf]
-                hist, bin_edges = np.histogram(neg_residuals_abs, bins=bins)
-                print("  - Negative residuals (absolute value) breakdown:")
-                for i in range(len(hist)):
-                    print(f"    - Range ({bin_edges[i]:.1e}, {bin_edges[i+1]:.1e}]: {hist[i]} points")
-            # --- 分布分析结束 ---
-
             print("-"*(40 + len(" DEBUG: Kriging Self-Prediction Test ")) + "\n")
         except Exception as e:
             print(f"❌ DEBUG: Failed to test Kriging self-prediction: {e}")
