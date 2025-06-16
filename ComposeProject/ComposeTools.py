@@ -1229,35 +1229,38 @@ class Mode2SampleAugmentor:
 
 class CouplingWorkflow:
     """
-    耦合工作流管理器
-    Coupling workflow manager
+    耦合工作流主编排器
+    Main orchestrator for coupling workflows
     """
-    
     def __init__(self, physical_params: Dict, config: ComposeConfig = None):
         """
-        初始化工作流管理器
+        初始化工作流
+        
         Args:
-            physical_params: PINN所需的物理参数字典
-            config: 全局配置
+            physical_params: 物理参数字典 (如rho, mu)
+            config: 全局配置对象
         """
-        self.config = config or ComposeConfig()
-        if not physical_params:
-            raise ValueError("CouplingWorkflow 需要 'physical_params' 来初始化PINN")
-            
         self.physical_params = physical_params
+        self.config = config or ComposeConfig()
         
-        # 为方案1预先创建一个PINN Adapter实例
-        self.pinn_adapter_mode1 = PINNAdapter(physical_params=self.physical_params, config=self.config)
-        
+        if self.config.verbose:
+            print("="*20 + " 耦合工作流初始化 " + "="*20)
+            print(f"  - 使用配置: {self.config}")
+
+        # 为每个模式初始化专用的工具集
         self.mode1_tools = {
-            'residual_kriging': Mode1ResidualKriging(config),
-            'fusion': Mode1Fusion()
-        }
-        self.mode2_tools = {
-            'roi_detector': Mode2ROIDetector(),
-            'augmentor': Mode2SampleAugmentor(config)
+            'residual_kriging': Mode1ResidualKriging(config=self.config),
+            'fusion': Mode1Fusion(config=self.config)
         }
         
+        self.mode2_tools = {
+            'roi_detector': Mode2ROIDetector(config=self.config),
+            'sample_augmentor': Mode2SampleAugmentor(config=self.config)
+        }
+
+        if self.config.verbose:
+            print("="*20 + " 初始化完成 " + "="*20 + "\n")
+
     def run_mode1_pipeline(self,
                           train_points: np.ndarray,
                           train_values: np.ndarray,
@@ -1401,51 +1404,74 @@ class CouplingWorkflow:
                           dose_data: Optional[Dict] = None,
                           **kwargs) -> Dict[str, Any]:
         """
-        执行方案2完整流程: Kriging ROI样本扩充 → PINN重训练
-        Execute Mode 2 complete pipeline  
+        执行方案2的工作流: Kriging ROI样本扩充 -> PINN重训练
+        Executes Mode 2 workflow: Kriging ROI sample augmentation -> PINN re-training
         """
-        if roi_strategy is None:
-            roi_strategy = self.config.roi_detection_strategy
-        if augment_factor is None:
-            augment_factor = self.config.sample_augment_factor
-            
-        results = {}
+        start_time = time.time()
+        results = {'timing': {}}
+
+        # 获取配置参数
+        roi_strategy = roi_strategy or self.config.roi_detection_strategy
+        augment_factor = augment_factor or self.config.sample_augment_factor
         
-        # 步骤1: ROI检测
-        print("🎯 步骤1: 检测感兴趣区域(ROI)...")
-        roi_bounds = self.mode2_tools['roi_detector'].detect_roi(
-            train_points, train_values, roi_strategy, **kwargs.get('roi_params', {})
+        print("\n" + "-"*20 + " 方案2: Kriging数据增强 -> PINN重训练 " + "-"*20)
+
+        # ==================== 步骤1: 初始PINN训练和预测 (作为基线) ====================
+        print("⚡ 步骤1: 初始PINN训练 (用于基线对比和ROI检测)...")
+        # 模仿方案1，为方案2创建独立的PINN适配器实例
+        pinn_adapter_mode2 = PINNAdapter(physical_params=self.physical_params, config=self.config)
+        
+        pinn_adapter_mode2.fit_from_memory(train_points, train_values, dose_data, **kwargs)
+        
+        # 使用初始PINN进行预测，作为性能对比的基线
+        initial_pinn_predictions = pinn_adapter_mode2.predict(prediction_points)
+        results['pinn_predictions'] = initial_pinn_predictions
+        print(f"   ✅ 初始PINN训练和基线预测完成。")
+        results['timing']['initial_pinn'] = time.time() - start_time
+
+        # ==================== 步骤2: ROI检测 ====================
+        current_time = time.time()
+        print(f"⚡ 步骤2: 感兴趣区域(ROI)检测 (策略: {roi_strategy})...")
+        roi_detector = self.mode2_tools['roi_detector']
+        roi_bounds = roi_detector.detect_roi(
+            train_points, train_values, roi_strategy=roi_strategy
         )
-        results['roi_bounds'] = roi_bounds
-        
-        # 步骤2: Kriging样本扩充
-        print("📈 步骤2: Kriging样本扩充...")
-        augmented_points, augmented_values = self.mode2_tools['augmentor'].augment_by_kriging(
-            train_points, train_values, roi_bounds, augment_factor,
-            **kwargs.get('kriging_params', {})
+        print(f"   ✅ ROI检测完成。")
+        results['timing']['roi_detection'] = time.time() - current_time
+
+        # ==================== 步骤3: Kriging数据增强 ====================
+        current_time = time.time()
+        print(f"⚡ 步骤3: Kriging数据增强 (扩充因子: {augment_factor})...")
+        augmentor = self.mode2_tools['sample_augmentor']
+        augmented_points, augmented_values = augmentor.augment_by_kriging(
+            train_points, train_values, roi_bounds, augment_factor=augment_factor
         )
-        results['augmented_points'] = augmented_points
-        results['augmented_values'] = augmented_values
+        print(f"   ✅ 成功生成 {len(augmented_points) - len(train_points)} 个新样本点。")
+        print(f"   📊 增强后总训练点数: {len(augmented_points)}")
+        results['timing']['augmentation'] = time.time() - current_time
         
-        # 步骤3: 用扩充数据重新训练PINN
-        print("🔄 步骤3: 用扩充数据重新训练PINN...")
-        enhanced_pinn = PINNAdapter(physical_params=self.physical_params, config=self.config)
-        enhanced_pinn.fit_from_memory(
+        # ==================== 步骤4: PINN模型重训练 ====================
+        current_time = time.time()
+        print("⚡ 步骤4: 使用增强数据进行PINN模型重训练...")
+        # 使用同一个适配器实例进行重训练
+        pinn_adapter_mode2.fit_from_memory(
             train_points=augmented_points, 
-            train_values=augmented_values,
-            dose_data=dose_data,
-            epochs=kwargs.get('epochs'),
-            loss_weights=kwargs.get('loss_weights'),
-            use_lbfgs=kwargs.get('use_lbfgs')
+            train_values=augmented_values, 
+            dose_data=dose_data, 
+            **kwargs
         )
+        print(f"   ✅ PINN模型重训练完成。")
+        results['timing']['pinn_retrain'] = time.time() - current_time
+
+        # ==================== 步骤5: 最终预测 ====================
+        current_time = time.time()
+        print("⚡ 步骤5: 使用重训练后的模型进行最终预测...")
+        final_predictions = pinn_adapter_mode2.predict(prediction_points)
+        results['final_predictions'] = final_predictions
+        print(f"   ✅ 最终预测完成。")
+        results['timing']['final_prediction'] = time.time() - current_time
         
-        # 步骤4: 最终预测
-        print("🔮 步骤4: 增强PINN全场预测...")
-        final_pred = enhanced_pinn.predict(prediction_points)
-        results['final_predictions'] = final_pred
-        results['enhanced_pinn'] = enhanced_pinn
-        
-        print("✅ 方案2流程完成!")
+        results['timing']['total'] = time.time() - start_time
         return results
 
 def print_compose_banner():
