@@ -27,7 +27,6 @@ try:
         print_compose_banner,
         validate_compose_environment,
         MetricsCalculator,
-        VisualizationTools
     )
     from PINN.data_processing import DataLoader
     from PINN.dataAnalysis import get_data
@@ -122,6 +121,8 @@ def main(args):
             dose_data=dose_data,
             roi_strategy=args.roi_strategy,
             augment_factor=args.augment_factor,
+            sampling_strategy=args.sampling_strategy,
+            sample_balancing=args.sample_balancing,
             **pinn_params
         )
     else:
@@ -210,11 +211,16 @@ if __name__ == "__main__":
     parser.add_argument('--seed', type=int, default=42,
                         help="随机种子，以确保结果可复现")
     # 为模式2添加新的命令行参数
-    parser.add_argument('--roi_strategy', type=str, default='high_density',
-                        choices=['high_density', 'high_value', 'bounding_box'],
+    parser.add_argument('--roi_strategy', type=str, default='gradient_aware',
+                        choices=['high_density', 'high_value', 'bounding_box', 'gradient_aware'],
                         help="[模式2专用] ROI检测策略")
     parser.add_argument('--augment_factor', type=float, default=2.0,
                         help="[模式2专用] Kriging数据增强的样本扩充倍数")
+    parser.add_argument('--sampling_strategy', type=str, default='adaptive',
+                        choices=['grid', 'random', 'adaptive', 'sobol', 'lhs'],
+                        help="[模式2专用] 采样点生成策略")
+    parser.add_argument('--sample_balancing', action='store_true', default=True,
+                        help="[模式2专用] 是否进行样本平衡处理")
     parser.add_argument('--use_lbfgs', action='store_true',
                         help="在PINN训练中使用L-BFGS进行精细调优")
     

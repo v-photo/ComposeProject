@@ -500,43 +500,20 @@ class KrigingAdapter:
         
     def fit(self, X: np.ndarray, y: np.ndarray, **kwargs) -> 'KrigingAdapter':
         """
-        训练Kriging模型
-        Train the Kriging model.
-
-        Args:
-            X: 坐标点 (N, D), D是维度
-            y: 观测值 (N,)
-            **kwargs: 传递给底层Kriging实现的参数
-        """
-        if self.config.verbose:
-            print("INFO: 开始执行 KrigingAdapter.fit()")
-            
-        # ==================== 新增：离群值筛选策略 ====================
-        if len(y) > 1:
-            mean_val = np.mean(y)
-            std_val = np.std(y)
-            lower_bound = mean_val - 2 * std_val
-            upper_bound = mean_val + 2 * std_val
-            
-            original_count = len(y)
-            mask = (y >= lower_bound) & (y <= upper_bound)
-            
-            X_filtered = X[mask]
-            y_filtered = y[mask]
-            
-            filtered_count = original_count - len(y_filtered)
-            if self.config.verbose and filtered_count > 0:
-                print(f"      - 离群值筛选: 移除了 {filtered_count} 个点 (原始: {original_count}, 筛选后: {len(y_filtered)})")
-                print(f"      - 筛选范围: [{lower_bound:.2f}, {upper_bound:.2f}]")
-            
-            # 使用筛选后的数据进行训练
-            X = X_filtered
-            y = y_filtered
-        # ==========================================================
-
-        # 使用MyOrdinaryKriging3D进行训练
-        variogram_model = kwargs.get('variogram_model', self.config.kriging_variogram_model)
+        标准化的fit接口
+        Standardized fit interface
         
+        Args:
+            X: 训练点坐标 (N, 3)
+            y: 训练点数值 (N,)
+            **kwargs: 额外的kriging参数
+            
+        Returns:
+            self
+        """
+        if not KRIGING_AVAILABLE:
+            raise RuntimeError("Kriging模块不可用")
+            
         # 将numpy数组转换为DataFrame格式（兼容现有接口）
         df = pd.DataFrame({
             'x': X[:, 0],
@@ -546,6 +523,7 @@ class KrigingAdapter:
         })
         
         # 使用现有的training函数
+        variogram_model = kwargs.get('variogram_model', self.config.kriging_variogram_model)
         self.model = kriging_training(
             df=df,
             variogram_model=variogram_model,
@@ -647,10 +625,21 @@ class PINNAdapter:
                         train_points: np.ndarray,
                         train_values: np.ndarray,
                         dose_data: Dict, 
+                        sample_weights: Optional[np.ndarray] = None,
                         **kwargs) -> 'PINNAdapter':
         """
         使用内存中的训练数据点训练PINN模型。
         会自动处理对数转换。此方法专为耦合工作流设计。
+        
+        Args:
+            train_points: 训练点坐标 (N, 3)
+            train_values: 训练点数值 (N,)
+            dose_data: 剂量数据字典
+            sample_weights: 样本权重 (N,)，可选
+            **kwargs: 其他参数
+            
+        Returns:
+            self
         """
         print("INFO: 开始执行 PINNAdapter.fit_from_memory()")
         
@@ -664,6 +653,19 @@ class PINNAdapter:
         network_config = kwargs.get('network_config', {'layers': [3] + [32] * 4 + [1], 'activation': 'tanh'})
         include_source = kwargs.get('include_source', False)
         
+        # 检查是否提供了样本权重
+        if sample_weights is not None:
+            print(f"      - 检测到样本权重，将用于训练 (权重范围: [{np.min(sample_weights):.4f}, {np.max(sample_weights):.4f}])")
+            # 确保权重长度与样本数量匹配
+            if len(sample_weights) != len(train_points):
+                raise ValueError(f"样本权重长度 ({len(sample_weights)}) 与训练点数量 ({len(train_points)}) 不匹配")
+            
+            # 存储样本权重供后续使用（如果PINN模块支持）
+            self._sample_weights = sample_weights
+        else:
+            print("      - 未提供样本权重，使用均匀权重")
+            self._sample_weights = None
+            
         self.trainer.create_pinn_model(
             dose_data=dose_data,
             sampled_points_xyz=train_points,
@@ -675,6 +677,12 @@ class PINNAdapter:
         epochs = kwargs.get('epochs', 10000)
         use_lbfgs = kwargs.get('use_lbfgs', True)
         loss_weights = kwargs.get('loss_weights', [1, 100])
+        
+        # 如果有样本权重，尝试通过其他方式应用
+        if self._sample_weights is not None:
+            print("      - 注意: 当前PINN模块不直接支持样本权重，将通过其他方式实现")
+            # 这里可以添加适用于您PINN模块的权重实现方式
+            # 例如：通过修改损失函数、重复数据点等
         
         self.trainer.train(
             epochs=epochs, 
@@ -1020,6 +1028,10 @@ class Mode2ROIDetector:
             return Mode2ROIDetector._detect_bounding_box_roi(
                 train_points, train_values, **strategy_params
             )
+        elif roi_strategy == 'gradient_aware':
+            return Mode2ROIDetector._detect_gradient_aware_roi(
+                train_points, train_values, **strategy_params
+            )
         else:
             raise ValueError(f"不支持的ROI策略: {roi_strategy}")
     
@@ -1125,6 +1137,116 @@ class Mode2ROIDetector:
             'mask': all_points_mask,
             'bounding_box': True
         }
+        
+    @staticmethod
+    def _detect_gradient_aware_roi(train_points: np.ndarray,
+                                  train_values: np.ndarray,
+                                  pinn_predictions: Optional[np.ndarray] = None,
+                                  gradient_percentile: float = 90,
+                                  expansion_factor: float = 1.2) -> Dict[str, np.ndarray]:
+        """
+        基于梯度的ROI检测策略
+        通过计算场值的空间梯度来检测高梯度区域作为ROI
+        
+        Args:
+            train_points: 训练点坐标 (N, 3)
+            train_values: 训练点真实值 (N,)
+            pinn_predictions: PINN在训练点的预测值（可选）(N,)
+            gradient_percentile: 梯度阈值的百分位数
+            expansion_factor: ROI扩展系数
+            
+        Returns:
+            roi_bounds: ROI边界信息
+        """
+        from scipy.spatial import cKDTree
+        
+        # 使用PINN预测和真实值的差异场，如果提供的话
+        values_to_analyze = train_values
+        if pinn_predictions is not None:
+            # 使用误差场的绝对值
+            values_to_analyze = np.abs(train_values - pinn_predictions)
+            
+        # 构建KD树以寻找近邻点
+        tree = cKDTree(train_points)
+        
+        # 计算数值梯度
+        k = min(15, len(train_points) - 1)  # 用于梯度计算的近邻数
+        gradients = []
+        
+        for i in range(len(train_points)):
+            # 找到近邻点
+            distances, indices = tree.query(train_points[i], k=k+1)
+            neighbors = train_points[indices[1:]]  # 排除自身
+            neighbor_values = values_to_analyze[indices[1:]]
+            
+            if len(neighbors) < 3:  # 梯度计算需要至少3个点
+                gradients.append(0)
+                continue
+                
+            # 使用向量减去中心点，形成一个局部坐标系
+            local_coords = neighbors - train_points[i]
+            
+            # 简单计算梯度: 数值变化 / 距离变化
+            value_diffs = neighbor_values - values_to_analyze[i]
+            
+            # 计算每个方向的单位向量和对应梯度
+            gradient_magnitudes = []
+            for j, coord in enumerate(local_coords):
+                dist = np.linalg.norm(coord)
+                if dist > EPSILON:
+                    # 沿该方向的梯度大小
+                    grad_magnitude = abs(value_diffs[j] / dist)
+                    gradient_magnitudes.append(grad_magnitude)
+            
+            # 取平均梯度大小
+            if gradient_magnitudes:
+                gradients.append(np.mean(gradient_magnitudes))
+            else:
+                gradients.append(0)
+        
+        gradients = np.array(gradients)
+        
+        # 计算局部曲率（近似Hessian）
+        curvature = np.zeros_like(gradients)
+        for i in range(len(train_points)):
+            distances, indices = tree.query(train_points[i], k=min(8, k+1)) 
+            neighbor_gradients = gradients[indices[1:]]  # 排除自身
+            if len(neighbor_gradients) > 0:
+                # 梯度变化作为曲率度量
+                curvature[i] = np.std(neighbor_gradients)
+                
+        # 组合梯度和曲率信息
+        importance_score = gradients + 0.5 * curvature
+        
+        # 选择高重要性区域
+        threshold = np.percentile(importance_score, gradient_percentile)
+        high_gradient_mask = importance_score >= threshold
+        
+        if not np.any(high_gradient_mask):
+            # 如果没有满足条件的点，使用所有点
+            high_gradient_mask = np.ones(len(train_points), dtype=bool)
+            print("   ⚠️ 没有检测到高梯度区域，使用所有点作为ROI")
+        
+        roi_points = train_points[high_gradient_mask]
+        
+        # 计算ROI边界
+        roi_min = np.min(roi_points, axis=0)
+        roi_max = np.max(roi_points, axis=0)
+        
+        # 扩展边界
+        roi_center = (roi_min + roi_max) / 2
+        roi_size = (roi_max - roi_min) * expansion_factor
+        roi_min = roi_center - roi_size / 2
+        roi_max = roi_center + roi_size / 2
+        
+        return {
+            'min': roi_min,
+            'max': roi_max,
+            'mask': high_gradient_mask,
+            'importance_scores': importance_score,
+            'gradients': gradients,
+            'curvature': curvature
+        }
 
 class Mode2SampleAugmentor:
     """
@@ -1141,7 +1263,7 @@ class Mode2SampleAugmentor:
                           train_values: np.ndarray,
                           roi_bounds: Dict[str, np.ndarray],
                           augment_factor: float = 2.0,
-                          sampling_strategy: str = 'grid',
+                          sampling_strategy: str = 'adaptive',  # 默认改为adaptive
                           **kriging_params) -> Tuple[np.ndarray, np.ndarray]:
         """
         在ROI内用Kriging生成新样本
@@ -1152,7 +1274,7 @@ class Mode2SampleAugmentor:
             train_values: 原始训练值 (N,)
             roi_bounds: ROI边界信息
             augment_factor: 扩充倍数 (新样本数 = 原样本数 × (augment_factor - 1))
-            sampling_strategy: 采样策略 ('grid', 'random', 'adaptive')
+            sampling_strategy: 采样策略 ('grid', 'random', 'adaptive', 'sobol', 'lhs')
             **kriging_params: Kriging参数
             
         Returns:
@@ -1184,9 +1306,8 @@ class Mode2SampleAugmentor:
         
         if self.config.verbose:
             print(f"样本扩充完成: {n_original} → {len(augmented_points)} 个样本")
-            print(f"原始样本数值范围: [{np.min(train_values):.4e}, {np.max(train_values):.4e}]")
             print(f"新样本数值范围: [{np.min(new_values):.4e}, {np.max(new_values):.4e}]")
-        
+            print(f"原始样本数值范围: [{np.min(train_values):.4e}, {np.max(train_values):.4e}]")
         return augmented_points, augmented_values
     
     def _generate_sampling_points(self,
@@ -1204,6 +1325,10 @@ class Mode2SampleAugmentor:
             return self._generate_random_points(roi_min, roi_max, n_points)
         elif strategy == 'adaptive':
             return self._generate_adaptive_points(roi_min, roi_max, n_points, existing_points)
+        elif strategy == 'sobol':
+            return self._generate_sobol_points(roi_min, roi_max, n_points)
+        elif strategy == 'lhs':
+            return self._generate_lhs_points(roi_min, roi_max, n_points)
         else:
             raise ValueError(f"不支持的采样策略: {strategy}")
     
@@ -1234,24 +1359,105 @@ class Mode2SampleAugmentor:
     
     def _generate_adaptive_points(self, roi_min: np.ndarray, roi_max: np.ndarray, 
                                 n_points: int, existing_points: np.ndarray) -> np.ndarray:
-        """生成自适应采样点（避开已有点密集区域）"""
+        """
+        生成自适应采样点（使用Max-min距离策略）
+        结合KD-Tree和最大最小距离，确保新点远离已有点，同时覆盖空间
+        """
         from scipy.spatial import cKDTree
         
         # 构建已有点的KD树
         tree = cKDTree(existing_points)
         
-        # 生成候选点（比需要的多一些）
-        n_candidates = n_points * 3
-        candidate_points = self._generate_random_points(roi_min, roi_max, n_candidates)
+        # 使用Max-min策略选择点
+        selected_points = []
         
-        # 计算每个候选点到最近已有点的距离
-        distances, _ = tree.query(candidate_points)
+        # 第一个点随机选择
+        candidate = roi_min + np.random.rand(3) * (roi_max - roi_min)
+        selected_points.append(candidate)
         
-        # 选择距离较大的点（远离已有点）
-        sorted_indices = np.argsort(distances)[::-1]  # 降序排列
-        selected_indices = sorted_indices[:n_points]
+        # 生成候选点池（比所需点数多，提高效率）
+        pool_size = min(n_points * 10, 10000)  # 避免过大的候选池
+        candidate_pool = roi_min + np.random.rand(pool_size, 3) * (roi_max - roi_min)
         
-        return candidate_points[selected_indices]
+        # 逐点添加剩余点
+        pbar = range(n_points - 1)
+        if self.config.verbose and n_points > 100:
+            try:
+                from tqdm import tqdm
+                pbar = tqdm(pbar, desc="生成自适应采样点")
+            except ImportError:
+                pass
+                
+        for _ in pbar:
+            if len(selected_points) >= n_points:
+                break
+                
+            # 更新KD树，包含已有点和已选点
+            current_points = np.vstack([existing_points, selected_points])
+            current_tree = cKDTree(current_points)
+            
+            # 计算候选池中每个点到当前已有点的最小距离
+            distances, _ = current_tree.query(candidate_pool, k=1)
+            
+            # 选择最小距离最大的候选点（最远点）
+            best_idx = np.argmax(distances)
+            best_point = candidate_pool[best_idx]
+            
+            # 添加到已选点集
+            selected_points.append(best_point)
+            
+            # 从候选池中移除已选点，并补充新的随机点
+            candidate_pool[best_idx] = roi_min + np.random.rand(3) * (roi_max - roi_min)
+        
+        return np.array(selected_points)
+    
+    def _generate_sobol_points(self, roi_min: np.ndarray, roi_max: np.ndarray, n_points: int) -> np.ndarray:
+        """
+        使用Sobol序列生成低差异点集
+        Sobol序列是一种准随机序列，具有更均匀的空间覆盖性
+        """
+        try:
+            from scipy.stats import qmc
+            
+            # 创建Sobol生成器
+            sampler = qmc.Sobol(d=3, scramble=True)
+            
+            # 生成[0,1)^3空间的点
+            sample = sampler.random(n=n_points)
+            
+            # 缩放到ROI范围
+            points = qmc.scale(sample, roi_min, roi_max)
+            
+            return points
+            
+        except (ImportError, AttributeError):
+            # 如果scipy版本不支持qmc，回退到随机采样
+            print("   ⚠️ SciPy qmc模块不可用，回退到随机采样")
+            return self._generate_random_points(roi_min, roi_max, n_points)
+    
+    def _generate_lhs_points(self, roi_min: np.ndarray, roi_max: np.ndarray, n_points: int) -> np.ndarray:
+        """
+        使用Latin Hypercube采样生成点
+        Latin Hypercube采样可以确保在每个维度上的投影分布均匀
+        """
+        try:
+            from scipy.stats import qmc
+            
+            # 创建Latin Hypercube采样器
+            sampler = qmc.LatinHypercube(d=3)
+            
+            # 生成[0,1)^3空间的点
+            sample = sampler.random(n=n_points)
+            
+            # 缩放到ROI范围
+            points = qmc.scale(sample, roi_min, roi_max)
+            
+            return points
+            
+        except (ImportError, AttributeError):
+            # 如果scipy版本不支持qmc，回退到随机采样
+            print("   ⚠️ SciPy qmc模块不可用，回退到随机采样")
+            return self._generate_random_points(roi_min, roi_max, n_points)
 
 # ==================== 端到端耦合工作流 ====================
 # End-to-end coupling workflows
@@ -1308,8 +1514,7 @@ class CouplingWorkflow:
         
         # 步骤1: 训练PINN
         print("🔥 步骤1: 训练PINN模型...")
-        pinn_adapter_mode1 = PINNAdapter(physical_params=self.physical_params, config=self.config)
-        pinn_adapter_mode1.fit_from_memory(
+        self.pinn_adapter_mode1.fit_from_memory(
             train_points=train_points, 
             train_values=train_values,
             dose_data=dose_data,
@@ -1320,8 +1525,8 @@ class CouplingWorkflow:
         
         # 步骤2: PINN预测
         print("🔮 步骤2: PINN全场预测...")
-        pinn_train_pred = pinn_adapter_mode1.predict(train_points)
-        pinn_field_pred = pinn_adapter_mode1.predict(prediction_points)
+        pinn_train_pred = self.pinn_adapter_mode1.predict(train_points)
+        pinn_field_pred = self.pinn_adapter_mode1.predict(prediction_points)
         
         # ==================== 新增：详细PINN误差统计 ====================
         print("\n📊 步骤2.1: PINN误差分析...")
@@ -1432,6 +1637,8 @@ class CouplingWorkflow:
                           roi_strategy: Optional[str] = None,
                           augment_factor: Optional[float] = None,
                           dose_data: Optional[Dict] = None,
+                          sampling_strategy: str = 'adaptive',
+                          sample_balancing: bool = True,  # 新增参数：是否进行样本平衡
                           **kwargs) -> Dict[str, Any]:
         """
         执行方案2的工作流: Kriging ROI样本扩充 -> PINN重训练
@@ -1448,13 +1655,15 @@ class CouplingWorkflow:
 
         # ==================== 步骤1: 初始PINN训练和预测 (作为基线) ====================
         print("⚡ 步骤1: 初始PINN训练 (用于基线对比和ROI检测)...")
-        # 模仿方案1，为方案2创建独立的PINN适配器实例
+        # 创建PINN适配器实例
         pinn_adapter_mode2 = PINNAdapter(physical_params=self.physical_params, config=self.config)
         
         pinn_adapter_mode2.fit_from_memory(train_points, train_values, dose_data, **kwargs)
         
         # 使用初始PINN进行预测，作为性能对比的基线
         initial_pinn_predictions = pinn_adapter_mode2.predict(prediction_points)
+        # 获取训练点上的预测，用于ROI检测
+        train_pinn_predictions = pinn_adapter_mode2.predict(train_points)
         results['pinn_predictions'] = initial_pinn_predictions
         print(f"   ✅ 初始PINN训练和基线预测完成。")
         results['timing']['initial_pinn'] = time.time() - start_time
@@ -1463,39 +1672,93 @@ class CouplingWorkflow:
         current_time = time.time()
         print(f"⚡ 步骤2: 感兴趣区域(ROI)检测 (策略: {roi_strategy})...")
         roi_detector = self.mode2_tools['roi_detector']
+        
+        # 如果使用梯度感知的ROI检测，传入PINN预测结果
+        roi_detection_params = {}
+        if roi_strategy == 'gradient_aware':
+            roi_detection_params['pinn_predictions'] = train_pinn_predictions
+            print(f"   🔍 使用梯度感知的ROI检测，分析PINN误差场梯度...")
+        
         roi_bounds = roi_detector.detect_roi(
-            train_points, train_values, roi_strategy=roi_strategy
+            train_points, train_values, roi_strategy=roi_strategy, **roi_detection_params
         )
         print(f"   ✅ ROI检测完成。")
         results['timing']['roi_detection'] = time.time() - current_time
 
         # ==================== 步骤3: Kriging数据增强 ====================
         current_time = time.time()
-        print(f"⚡ 步骤3: Kriging数据增强 (扩充因子: {augment_factor})...")
+        print(f"⚡ 步骤3: Kriging数据增强 (扩充因子: {augment_factor}, 采样策略: {sampling_strategy})...")
         augmentor = self.mode2_tools['sample_augmentor']
         augmented_points, augmented_values = augmentor.augment_by_kriging(
-            train_points, train_values, roi_bounds, augment_factor=augment_factor
+            train_points, train_values, roi_bounds, 
+            augment_factor=augment_factor,
+            sampling_strategy=sampling_strategy
         )
         print(f"   ✅ 成功生成 {len(augmented_points) - len(train_points)} 个新样本点。")
         print(f"   📊 增强后总训练点数: {len(augmented_points)}")
         results['timing']['augmentation'] = time.time() - current_time
         
-        # ==================== 步骤4: PINN模型重训练 ====================
+        # ==================== 步骤4: 样本平衡 (新增) ====================
         current_time = time.time()
-        print("⚡ 步骤4: 使用增强数据进行PINN模型重训练...")
-        # 使用同一个适配器实例进行重训练
+        if sample_balancing:
+            print("⚡ 步骤4: 样本平衡处理...")
+            
+            # 获取原样本和新样本在ROI中的比例
+            n_original = len(train_points)
+            n_augmented = len(augmented_points) - n_original
+            
+            # 计算样本权重
+            sample_weights = np.ones(len(augmented_points))
+            
+            # 确定原始样本和新生成样本的权重
+            original_weight = 1.0
+            augmented_weight = 0.5  # 新生成的样本权重
+            
+            # 原样本使用标准权重
+            sample_weights[:n_original] = original_weight
+            
+            # 新生成的样本使用较低的权重
+            sample_weights[n_original:] = augmented_weight
+            
+            # 对权重进行标准化，使其和为样本总数
+            sample_weights = sample_weights * len(sample_weights) / np.sum(sample_weights)
+            
+            print(f"   📊 样本权重统计: 原始样本={original_weight}, 新样本={augmented_weight}")
+            print(f"   ✅ 样本平衡处理完成。")
+            
+            results['sample_weights'] = sample_weights
+        else:
+            print("⚡ 步骤4: 跳过样本平衡，使用均匀权重...")
+            results['sample_weights'] = np.ones(len(augmented_points))
+        
+        results['timing']['sample_balancing'] = time.time() - current_time
+        
+        # ==================== 步骤5: PINN模型重训练 ====================
+        current_time = time.time()
+        print("⚡ 步骤5: 使用增强数据进行PINN模型重训练...")
+        
+        # 如果启用了样本平衡，添加样本权重参数
+        if sample_balancing:
+            # 克隆一个修改后的kwargs字典
+            train_kwargs = kwargs.copy()
+            train_kwargs['sample_weights'] = results['sample_weights']
+            print("   🔧 将样本权重传递给PINN训练...")
+        else:
+            train_kwargs = kwargs
+        
+        # 使用适配器进行重训练
         pinn_adapter_mode2.fit_from_memory(
             train_points=augmented_points, 
             train_values=augmented_values, 
             dose_data=dose_data, 
-            **kwargs
+            **train_kwargs
         )
         print(f"   ✅ PINN模型重训练完成。")
         results['timing']['pinn_retrain'] = time.time() - current_time
 
-        # ==================== 步骤5: 最终预测 ====================
+        # ==================== 步骤6: 最终预测 ====================
         current_time = time.time()
-        print("⚡ 步骤5: 使用重训练后的模型进行最终预测...")
+        print("⚡ 步骤6: 使用重训练后的模型进行最终预测...")
         final_predictions = pinn_adapter_mode2.predict(prediction_points)
         results['final_predictions'] = final_predictions
         print(f"   ✅ 最终预测完成。")

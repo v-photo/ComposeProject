@@ -24,7 +24,7 @@ import warnings
 import time
 from dataclasses import dataclass
 from pathlib import Path
-import pickle
+from sklearn.model_selection import train_test_split # <--- 请添加这一行
 
 # ==================== 耦合项目原有工具和模块导入 ====================
 from PINN.pinn_core import SimulationConfig, PINNTrainer, ResultAnalyzer
@@ -1502,6 +1502,7 @@ class CouplingWorkflow:
                           prediction_points: np.ndarray,
                           fusion_weight: Optional[float] = None,
                           dose_data: Optional[Dict] = None,
+                          residual_split_ratio: float = 2/3,
                           **kwargs) -> Dict[str, Any]:
         """
         执行方案1完整流程: PINN → 残差Kriging → 加权融合
