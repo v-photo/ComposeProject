@@ -1,5 +1,5 @@
 # 忽略所有 .pkl 文件
-*.pkl
+*.*pkl
 
 # 忽略所有 .xlsx 文件
 *.xlsx
