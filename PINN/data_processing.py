@@ -290,7 +290,100 @@ class DataLoader:
         return processor.load_from_numpy(dose_array, space_dims, world_bounds)
     
     @staticmethod
-    def sample_training_points(dose_data, num_samples=300, sampling_strategy='positive_weighted'):
+    def _sample_focused_random(dose_data: Dict, 
+                            num_samples: int,
+                            focus_center: np.ndarray,
+                            focus_radius: float,
+                            focus_ratio: float = 0.7) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        对特定球形区域进行重点采样的内部辅助函数。
+        
+        该方法首先识别出所有剂量为正的体素，然后根据它们是否在定义的“焦点区域”内，
+        将它们分为“焦点组”和“全局组”。最后，根据指定的比例从这两组中随机抽取样本。
+        这种方法比“先随机撒点再验证”的效率高得多，尤其是在有效数据区域稀疏时。
+
+        Args:
+            dose_data: 包含剂量网格和物理尺寸的字典。
+            num_samples: 需要返回的样本总数。
+            focus_center: 焦点球体的中心坐标 [x, y, z]。
+            focus_radius: 焦点球体的半径。
+            focus_ratio: 希望在焦点区域内生成的样本所占的比例。
+            
+        Returns:
+            (采样点坐标, 对应的剂量值, 对应的网格索引) 的元组。
+        """
+        world_min = dose_data['world_min']
+        dose_grid = dose_data['dose_grid']
+        voxel_size = dose_data['voxel_size']
+        
+        # 步骤 1: 找出所有剂量为正的有效体素
+        positive_indices = np.argwhere(dose_grid > EPSILON)
+        if len(positive_indices) == 0:
+            print("警告: 数据网格中没有找到任何剂量为正的点。返回空数组。")
+            return np.array([]), np.array([]), np.array([])
+            
+        # 将有效体素的网格索引转换为世界坐标
+        positive_coords = world_min + (positive_indices + 0.5) * voxel_size
+
+        # 步骤 2: 根据与焦点中心的距离，将有效点分为“焦点组”和“全局组”
+        distances_to_center = np.linalg.norm(positive_coords - focus_center, axis=1)
+        is_in_focus_zone = distances_to_center <= focus_radius
+        
+        focused_candidate_indices = positive_indices[is_in_focus_zone]
+        global_candidate_indices = positive_indices[~is_in_focus_zone]
+
+        if len(focused_candidate_indices) == 0:
+            print(f"警告: 在焦点区域（中心: {focus_center}, 半径: {focus_radius}）内未找到任何有效数据点。将从所有有效点中进行采样。")
+            # 回退策略：如果焦点区没点，就把所有点都当成候选焦点，全局区为空
+            focused_candidate_indices = positive_indices 
+            global_candidate_indices = np.array([[]]).reshape(0,3).astype(int) 
+
+        # 步骤 3: 按比例分配并抽取样本
+        num_focused_to_sample = int(num_samples * focus_ratio)
+        num_global_to_sample = num_samples - num_focused_to_sample
+
+        # 从焦点组中抽取
+        if len(focused_candidate_indices) > 0:
+            # 确保抽样数量不超过候选数量
+            num_to_sample = min(num_focused_to_sample, len(focused_candidate_indices))
+            focused_sample_idx = np.random.choice(len(focused_candidate_indices), num_to_sample, replace=False)
+            final_focused_indices = focused_candidate_indices[focused_sample_idx]
+        else:
+            final_focused_indices = np.array([[]]).reshape(0,3).astype(int)
+
+        # 从全局组中抽取
+        if len(global_candidate_indices) > 0:
+            # 确保抽样数量不超过候选数量
+            num_to_sample = min(num_global_to_sample, len(global_candidate_indices))
+            global_sample_idx = np.random.choice(len(global_candidate_indices), num_to_sample, replace=False)
+            final_global_indices = global_candidate_indices[global_sample_idx]
+        else:
+            final_global_indices = np.array([[]]).reshape(0,3).astype(int)
+            
+        # 步骤 4: 合并样本并返回结果
+        if len(final_focused_indices) > 0 and len(final_global_indices) > 0:
+            final_indices_grid = np.vstack([final_focused_indices, final_global_indices])
+        elif len(final_focused_indices) > 0:
+            final_indices_grid = final_focused_indices
+        else:
+            final_indices_grid = final_global_indices
+
+        if len(final_indices_grid) == 0:
+            print("警告: 未能抽取到任何样本点。")
+            return np.array([]), np.array([]), np.array([])
+
+        print(f"  - 在焦点区域找到 {len(focused_candidate_indices)} 个候选点, 抽取了 {len(final_focused_indices)} 个。")
+        print(f"  - 在全局区域找到 {len(global_candidate_indices)} 个候选点, 抽取了 {len(final_global_indices)} 个。")
+        print(f"  - 总计返回 {len(final_indices_grid)} 个有效样本点。")
+        
+        sampled_points_xyz = world_min + (final_indices_grid + 0.5) * voxel_size
+        indices_tuple = (final_indices_grid[:, 0], final_indices_grid[:, 1], final_indices_grid[:, 2])
+        sampled_doses_values = dose_grid[indices_tuple]
+
+        return sampled_points_xyz, sampled_doses_values, final_indices_grid
+    
+    @staticmethod
+    def sample_training_points(dose_data, num_samples=300, sampling_strategy='positive_weighted', **kwargs):
         """
         Sample training points from dose data
         Enhanced version with more sampling strategies
@@ -386,7 +479,22 @@ class DataLoader:
                     sampled_indices = positive_indices[sample_idx]
                 else:
                     sampled_indices = positive_indices
-                    
+        
+        elif sampling_strategy == 'focused_random':
+            print("Using 'focused_random' sampling strategy...")
+            focus_center = kwargs.get('focus_center')
+            focus_radius = kwargs.get('focus_radius')
+            
+            if focus_center is None or focus_radius is None:
+                raise ValueError("策略 'focused_random' 需要提供 'focus_center' 和 'focus_radius' 参数。")
+                
+            return DataLoader._sample_focused_random(
+                dose_data=dose_data,
+                num_samples=num_samples,
+                focus_center=np.array(focus_center),
+                focus_radius=focus_radius,
+                focus_ratio=kwargs.get('focus_ratio', 0.7)
+            )      
         else:
             raise ValueError(f"Unknown sampling strategy: {sampling_strategy}")
         

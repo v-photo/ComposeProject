@@ -7,7 +7,6 @@ from pathlib import Path
 # import matplotlib
 # matplotlib.use('Agg') # <--- 在导入pyplot之前设置后端
 # import matplotlib.pyplot as plt
-from typing import Dict
 
 # --- 路径设置 ---
 try:
@@ -35,23 +34,6 @@ try:
 except ImportError as e:
     print(f"❌ 模块导入失败: {e}")
     sys.exit(1)
-
-def print_domain_info(dose_data: Dict):
-    """
-    打印出加载的数据场的物理空间信息，以辅助手动设置参数。
-
-    Args:
-        dose_data: 从DataLoader加载的标准化剂量数据字典。
-    """
-    world_min = dose_data['world_min']
-    world_max = dose_data['world_max']
-    space_dims = dose_data['space_dims']
-    
-    print("\n" + "="*25 + " 物理空间信息参考 " + "="*25)
-    print(f"  - X轴范围: [{world_min[0]:.2f}, {world_max[0]:.2f}] (总长度: {space_dims[0]:.2f} 米)")
-    print(f"  - Y轴范围: [{world_min[1]:.2f}, {world_max[1]:.2f}] (总长度: {space_dims[1]:.2f} 米)")
-    print(f"  - Z轴范围: [{world_min[2]:.2f}, {world_max[2]:.2f}] (总长度: {space_dims[2]:.2f} 米)")
-    print("=" * (50 + 4) + "\n")
 
 def main(args):
     """主执行函数"""
@@ -82,15 +64,12 @@ def main(args):
         space_dims=np.array([20.0, 10.0, 10.0]) # 示例维度
     )
     
-    # 打印物理空间信息以供参考
-    print_domain_info(dose_data)
-    
     # 采样训练点 (用于两个方案的初始训练)
     print(f"采样 {args.num_samples} 个训练点...")
     train_points, train_values, _ = DataLoader.sample_training_points(
         dose_data, 
         num_samples=args.num_samples,
-        sampling_strategy='positive_only', # 使用 'positive_only' 策略
+        sampling_strategy='positive_only' # 使用 'positive_only' 策略
     )
     print(f"✅ 成功采样 {len(train_points)} 个训练点。")
 
@@ -116,25 +95,45 @@ def main(args):
     prediction_points = np.vstack([XX.ravel(), YY.ravel(), ZZ.ravel()]).T
 
     # ==================== 3. 初始化并执行工作流 ====================
-    print(f"\n" + "="*25 + f" 步骤2: 执行自动选择工作流 " + "="*25)
-    
+    print(f"\n" + "="*25 + f" 步骤2: 执行方案 {args.mode} " + "="*25)
     workflow = CouplingWorkflow(physical_params=physical_params, config=config)
     
+    results = {}
     pinn_params = {
         'epochs': args.pinn_epochs,
         'use_lbfgs': args.use_lbfgs,
         'loss_weights': [1, 100]
     }
 
-    results = workflow.run_auto_selection_pipeline(
-        train_points=train_points,
-        train_values=train_values,
-        prediction_points=prediction_points,
-        dose_data=dose_data,
-        **pinn_params
-    )
+    if args.mode == 1:
+        # 为方案1准备特定参数
+        mode1_params = {
+            'residual_split_ratio': args.residual_split_ratio
+        }
+        results = workflow.run_mode1_pipeline(
+            train_points=train_points,
+            train_values=train_values,
+            prediction_points=prediction_points,
+            dose_data=dose_data,
+            **pinn_params
+        )
+    elif args.mode == 2:
+        results = workflow.run_mode2_pipeline(
+            train_points=train_points,
+            train_values=train_values,
+            prediction_points=prediction_points,
+            dose_data=dose_data,
+            roi_strategy=args.roi_strategy,
+            augment_factor=args.augment_factor,
+            sampling_strategy=args.sampling_strategy,
+            sample_balancing=args.sample_balancing,
+            **pinn_params
+        )
+    else:
+        print(f"❌ 未知的模式: {args.mode}")
+        return
         
-    print(f"✅ 工作流执行完毕。")
+    print(f"✅ 方案 {args.mode} 执行完毕。")
     
     # ==================== 4. 评估和可视化 ====================
     print(f"\n" + "="*25 + " 步骤3: 结果评估 " + "="*25)
@@ -146,45 +145,91 @@ def main(args):
     else:
         test_values = dose_data['dose_grid'].flatten()
 
-    # ==================== 结果性能评估 ====================
-    print("\n" + "#"*20 + " 最终结果性能评估 " + "#"*20)
+    # ==================== DEBUG: PINN基线 vs 融合结果性能对比 ====================
+    print("\n" + "#"*20 + " DEBUG: 性能对比测试 " + "#"*20)
     
+    pinn_predictions = results.get('pinn_predictions')
     final_predictions = results.get('final_predictions')
-    method_used = results.get('method_used', '未知')
 
-    if final_predictions is not None:
+    if pinn_predictions is not None and final_predictions is not None:
         print(f"评估点数: {len(test_values)}")
-        print(f"本次运行使用的方法: {method_used.upper()}")
 
-        # 计算最终结果的性能
+        # 1. 计算PINN基线性能
+        pinn_metrics = MetricsCalculator.compute_metrics(test_values, pinn_predictions)
+        print("\n--- PINN基线性能 (无残差修正) ---")
+        for name, value in pinn_metrics.items():
+            print(f"  - {name}: {value:.6f}")
+
+        # 2. 计算最终融合后性能
         final_metrics = MetricsCalculator.compute_metrics(test_values, final_predictions)
         
-        print(f"\n--- 最终性能 ({method_used.upper()}) ---")
+        # 根据模式确定标题
+        if args.mode == 1:
+            print("\n--- 融合后性能 (PINN + Kriging残差修正) ---")
+        elif args.mode == 2:
+            print("\n--- 增强后性能 (PINN重训练后) ---")
+        else:
+            print("\n--- 最终性能 ---")
+            
         for name, value in final_metrics.items():
             print(f"  - {name}: {value:.6f}")
-    else:
-        print("⚠️ 未能获取最终预测结果，无法进行性能评估。")
 
-    print("#"*20 + " 性能评估结束 " + "#"*20 + "\n")
+        # 3. 计算性能提升
+        print("\n--- 性能提升分析 ---")
+        for metric in pinn_metrics:
+            if metric in final_metrics:
+                pinn_val = pinn_metrics[metric]
+                final_val = final_metrics[metric]
+                
+                # 对于越小越好的指标 (MAE, RMSE, MAPE)
+                if 'MAE' in metric or 'RMSE' in metric or 'MAPE' in metric:
+                    if abs(pinn_val) > 1e-9:
+                        improvement = (pinn_val - final_val) / pinn_val * 100
+                        print(f"  - {metric} 提升: {improvement:+.2f}% (越低越好)")
+                # 对于越大越好的指标 (R2)
+                elif 'R2' in metric:
+                    if abs(pinn_val) > 1e-9:
+                        improvement = (final_val - pinn_val) / abs(pinn_val) * 100
+                        print(f"  - {metric} 提升: {improvement:+.2f}% (越高越好)")
+    else:
+        print("⚠️ 未能获取PINN或最终预测结果，无法进行性能对比。")
+
+    print("#"*20 + " DEBUG: 性能对比结束 " + "#"*20 + "\n")
     # =======================================================================
         
     print("\n🎉 所有流程执行完毕。")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="运行 Kriging-PINN 自动选择工作流")
+    parser = argparse.ArgumentParser(description="运行 Kriging-PINN 耦合工作流")
+    parser.add_argument('--mode', type=int, choices=[1, 2], default=1,
+                        help="选择要运行的耦合方案 (1或2)")
     parser.add_argument('--data_path', type=str, default="PINN/DATA.xlsx",
                         help="输入数据文件的路径 (Excel格式)")
     parser.add_argument('--num_samples', type=int, default=300,
                         help="用于初始训练的采样点数量")
     parser.add_argument('--pinn_epochs', type=int, default=5000,
-                        help="PINN训练的周期数 (仅在选择PINN时生效)")
+                        help="PINN训练的周期数")
     parser.add_argument('--downsample', type=int, default=1,
                         help="全场预测网格的降采样系数(>1)，用于加速调试。")
     parser.add_argument('--seed', type=int, default=42,
                         help="随机种子，以确保结果可复现")
+    # 为模式1添加新的命令行参数
+    parser.add_argument('--residual_split_ratio', type=float, default=2/3.,
+                        help="[模式1专用] 用于PINN训练的数据集比例 (剩余部分用于残差计算)")
+    # 为模式2添加新的命令行参数
+    parser.add_argument('--roi_strategy', type=str, default='gradient_aware',
+                        choices=['high_density', 'high_value', 'bounding_box', 'gradient_aware'],
+                        help="[模式2专用] ROI检测策略")
+    parser.add_argument('--augment_factor', type=float, default=2.0,
+                        help="[模式2专用] Kriging数据增强的样本扩充倍数")
+    parser.add_argument('--sampling_strategy', type=str, default='adaptive',
+                        choices=['grid', 'random', 'adaptive', 'sobol', 'lhs'],
+                        help="[模式2专用] 采样点生成策略")
+    parser.add_argument('--sample_balancing', action='store_true', default=True,
+                        help="[模式2专用] 是否进行样本平衡处理")
     parser.add_argument('--use_lbfgs', action='store_true',
-                        help="在PINN训练中使用L-BFGS进行精细调优 (仅在选择PINN时生效)")
+                        help="在PINN训练中使用L-BFGS进行精细调优")
     
     args = parser.parse_args()
     
