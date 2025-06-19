@@ -288,15 +288,27 @@ class PINNModel:
 
 class AdaptiveSampler:
     """
-    [建议您实现] 自适应采样器。
+    [真实实现] 自适应采样器。
     用于根据Kriging的预测结果生成新的训练点。
     """
-    def __init__(self, domain_bounds, total_candidates=100000):
-        self.bounds = domain_bounds
-        # 预先在整个域内生成大量的候选点，后续从中筛选
-        self.candidate_points = np.random.rand(total_candidates, 3) * \
-            (domain_bounds[1] - domain_bounds[0]) + domain_bounds[0]
-        print(f"INFO: (AdaptiveSampler) Initialized with {total_candidates} candidate points.")
+    def __init__(self, world_min: np.ndarray, world_max: np.ndarray, total_candidates=100000):
+        """
+        初始化自适应采样器。
+
+        Args:
+            world_min (np.ndarray): 真实物理空间的最小坐标。
+            world_max (np.ndarray): 真实物理空间的最大坐标。
+            total_candidates (int): 在整个域内生成的候选点数量。
+        """
+        self.world_min = world_min
+        self.world_max = world_max
+        
+        # 在整个真实物理域内生成大量的候选点，后续从中筛选
+        self.candidate_points = (np.random.rand(total_candidates, 3) * 
+                                 (self.world_max - self.world_min) + self.world_min)
+                                 
+        print(f"INFO: (AdaptiveSampler) Initialized with {total_candidates} candidate points "
+              f"within physical bounds [{world_min.round(2)}, {world_max.round(2)}].")
 
     def generate_new_collocation_points(
         self,
@@ -370,11 +382,14 @@ def main():
         num_collocation_points=NUM_COLLOCATION_POINTS
     )
     kriging = GPUKriging()
-    sampler = AdaptiveSampler(DOMAIN_BOUNDS)
     
-    # 初始配置点：在真实物理空间内采样
+    # 从 dose_data 中获取真实的物理边界
     world_min = dose_data['world_min']
     world_max = dose_data['world_max']
+    
+    sampler = AdaptiveSampler(world_min, world_max)
+    
+    # 初始配置点：在真实物理空间内采样
     current_collocation_points = (np.random.rand(NUM_COLLOCATION_POINTS, 3) * 
                                   (world_max - world_min) + world_min)
 
