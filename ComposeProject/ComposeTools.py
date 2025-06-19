@@ -196,45 +196,6 @@ class MetricsCalculator:
         
         return stats
 
-    def fuse_predictions(self,
-                         pinn_pred: np.ndarray,
-                         kriging_pred: np.ndarray,
-                         kriging_std: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        [策略一] 基于Kriging不确定性阈值，进行硬切换融合.
-        Final = w * Kriging + (1 - w) * PINN
-        w = 1 if kriging_variance < threshold, else w = 0
-        
-        Args:
-            pinn_pred: PINN的预测值 (N,)
-            kriging_pred: Kriging的预测值 (N,)
-            kriging_std: Kriging预测的标准差 (N,)
-            
-        Returns:
-            (fused_prediction, fusion_weights): 融合后的预测和所使用的融合权重
-        """
-        threshold = self.config.kriging_variance_threshold
-        
-        # 1. 计算Kriging方差 (使用绝对值，不再归一化)
-        kriging_variance = kriging_std**2
-        
-        # 2. 根据阈值生成二元(0或1)权重
-        # 权重 w(x)=1 代表我们完全信任Kriging, w(x)=0 代表完全信任PINN
-        fusion_weights = (kriging_variance < threshold).astype(np.float32)
-        
-        # 3. 执行加权融合
-        fused_pred = fusion_weights * kriging_pred + (1 - fusion_weights) * pinn_pred
-        
-        if self.config.verbose:
-            kriging_trusted_count = np.sum(fusion_weights)
-            total_count = len(fusion_weights)
-            trust_ratio = kriging_trusted_count / total_count * 100
-            print("       - 融合权重统计 (策略一: 硬切换):")
-            print(f"         - Kriging方差阈值: {threshold:.4e}")
-            print(f"         - 信任Kriging的点数: {int(kriging_trusted_count)} / {total_count} ({trust_ratio:.2f}%)")
-
-        return fused_pred, fusion_weights
-
 # ==================== 模型适配器 (Model Adapters) ====================
 class KrigingAdapter:
     """
@@ -313,7 +274,7 @@ class KrigingAdapter:
             'z': X[:, 2], 
             'target': np.zeros(X.shape[0])  # 虚拟值
         })
-        
+        print(f"INFO: 开始执行 KrigingAdapter.predict()")
         # 使用现有的testing函数进行预测
         predictions, _ = kriging_testing(
             df=df_pred,
@@ -476,60 +437,6 @@ def validate_compose_environment() -> Dict[str, bool]:
         print(f"{component}: {status_str}")
     
     return status 
-
-# ==================== 方案1专用功能 (Mode 1 Specific) ====================
-class Mode1Fusion:
-    """
-    方案1: 基于焦点区域的硬切换融合
-    Mode 1: Hard-switch fusion based on focus region
-    """
-    def __init__(self, config: ComposeConfig = None):
-        self.config = config or ComposeConfig()
-    
-    def fuse_predictions(self,
-                         pinn_pred: np.ndarray,
-                         kriging_pred: np.ndarray,
-                         prediction_points: np.ndarray,
-                         focus_center: np.ndarray,
-                         focus_radius: float) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        [策略二] 基于预定义的焦点区域，进行硬切换融合.
-        Final = w * Kriging + (1 - w) * PINN
-        w = 1 if point is inside focus_sphere, else w = 0
-        
-        Args:
-            pinn_pred: PINN的预测值 (N,)
-            kriging_pred: Kriging的预测值 (N,)
-            prediction_points: 预测点的坐标 (N, 3)
-            focus_center: 焦点区域的中心 (3,)
-            focus_radius: 焦点区域的半径
-            
-        Returns:
-            (fused_prediction, fusion_weights): 融合后的预测和所使用的融合权重
-        """
-        if focus_center is None or focus_radius is None:
-            warnings.warn("未提供焦点区域参数，无法执行融合，将完全使用PINN结果。")
-            return pinn_pred, np.zeros_like(pinn_pred)
-
-        # 1. 计算所有预测点到焦点中心的距离
-        distances_to_center = np.linalg.norm(prediction_points - focus_center, axis=1)
-        
-        # 2. 根据距离和半径生成二元(0或1)权重
-        # 权重 w(x)=1 代表我们完全信任Kriging, w(x)=0 代表完全信任PINN
-        fusion_weights = (distances_to_center <= focus_radius).astype(np.float32)
-        
-        # 3. 执行加权融合
-        fused_pred = fusion_weights * kriging_pred + (1 - fusion_weights) * pinn_pred
-        
-        if self.config.verbose:
-            kriging_trusted_count = np.sum(fusion_weights)
-            total_count = len(fusion_weights)
-            trust_ratio = kriging_trusted_count / total_count * 100
-            print("       - 融合权重统计 (策略二: 焦点区域硬切换):")
-            print(f"         - 焦点中心: {focus_center}, 半径: {focus_radius}")
-            print(f"         - 信任Kriging的点数(在焦点区域内): {int(kriging_trusted_count)} / {total_count} ({trust_ratio:.2f}%)")
-
-        return fused_pred, fusion_weights
 
 # ==================== 端到端耦合工作流 ====================
 # End-to-end coupling workflows
