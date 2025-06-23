@@ -112,6 +112,7 @@ class DummyDataLoader:
 
         return main_train_set, reserve_pools, test_set, dose_data
 
+
 class GPUKriging:
     """
     [真实实现] GPU加速的克里金模型的适配器。
@@ -335,8 +336,7 @@ class PINNModel:
             return grad_u_sq + laplacian_u - k_squared
         return pde_func
 
-    def run_training_cycle(self, max_epochs: int, detect_every: int, collocation_points: np.ndarray, 
-                         detection_threshold: float = 0.1):
+    def run_training_cycle(self, max_epochs: int, detect_every: int, collocation_points: np.ndarray, detection_threshold: float = 0.1, reserve_data_pools: list = None):
         """
         [重构] 执行一个带有动态停止条件的训练周期。
         
@@ -345,9 +345,7 @@ class PINNModel:
             detect_every (int): 每隔多少轮进行一次性能检测。
             collocation_points (np.ndarray): 用于本周期的配置点。
             detection_threshold (float): 触发早停的相对改进阈值。
-        
-        Returns:
-            dict: 一个包含训练结果信息的字典，如{'stagnation_detected': bool}
+            reserve_data_pools (list, optional): [新] 包含储备数据池的列表。
         """
         # 1. 使用绝对路径定义检查点文件名的前缀，并确保目录存在
         script_dir = Path(__file__).parent.resolve()
@@ -362,10 +360,6 @@ class PINNModel:
         start_index = num_bc_points
         end_index = len(self.model.train_state.X_train) - len(self.data.anchors)
         self.model.train_state.X_train[start_index:end_index] = collocation_points
-        
-        # [新] 初始化本周期的返回状态
-        stagnation_detected_this_run = False
-        data_injected_this_cycle = False
         
         # 3. 创建回调，并用当前模型的性能初始化它
         stopper = EarlyCycleStopper(
@@ -408,8 +402,14 @@ class PINNModel:
                 latest_mre = self.model.train_state.metrics_test[-1]
                 if latest_mre > stopper.best_mre:
                     print(f"    ⚠️ Stagnation detected: MRE increased to {latest_mre:.4f} (best is {stopper.best_mre:.4f}).")
-                    stagnation_detected_this_run = True
                     
+                    # [新] 在回退前，检查是否有储备数据可以注入
+                    if reserve_data_pools: # 检查列表是否为非空
+                        data_to_inject = reserve_data_pools.pop(0)
+                        self.inject_new_data(data_to_inject)
+                    else:
+                        print("    (No more reserve data to inject.)")
+
                     print(f"    ↳ Forcing new adaptive resampling cycle...")
                     self.model.restore(stopper.best_model_path, verbose=0) 
                     should_exit_cycle = True
@@ -433,8 +433,6 @@ class PINNModel:
             os.remove(stopper.best_model_path) # 清理临时文件
         else:
             print("WARNING: (PINNModel) Best checkpoint file not found. Model may not be in its best state.")
-            
-        return {'stagnation_detected': stagnation_detected_this_run}
 
     def predict(self, points: np.ndarray) -> np.ndarray:
         """
@@ -590,10 +588,10 @@ def main():
     # --- 1. 初始化 ---
     # !! 注意: DOMAIN_BOUNDS 现在仅用于可视化或采样器，实际物理边界由加载的数据决定 !!
     DOMAIN_BOUNDS = np.array([[0., 0., 0.], [1., 1., 1.]]) 
-    TOTAL_EPOCHS = 5000
+    TOTAL_EPOCHS = 1000
     ADAPTIVE_CYCLE_EPOCHS = 500  # 每多少个epoch执行一次自适应调整
-    DETECT_EPOCHS = 50 # 每100轮检测一次性能
-    DATA_SPLIT_RATIOS = [0.7] + [0.05]*4
+    DETECT_EPOCHS = 100 # 每100轮检测一次性能
+    DATA_SPLIT_RATIOS = [0.72] + [0.01]*8
     
     # --- 数据加载参数 ---
     DATA_PATH = "PINN/DATA.xlsx"
@@ -634,9 +632,11 @@ def main():
     # --- 3. [修正] 训练循环 ---
     # 使用 while 循环来确保总训练轮数达标
     total_epochs_trained = 0
-    consecutive_stagnation_count = 0 # [新] 连续停滞计数器
-
     while total_epochs_trained < TOTAL_EPOCHS:
+        
+        # [新] 为每个周期重置停滞标志
+        stagnation_detected_in_cycle = False
+        
         remaining_total_epochs = TOTAL_EPOCHS - total_epochs_trained
         
         # 本次自适应周期的最大训练轮数，不能超过总剩余轮数
@@ -650,29 +650,17 @@ def main():
         # 记录进入此周期前的训练步数
         epochs_before_cycle = pinn.model.train_state.step or 0
         
-        # 调用改造后的方法，并接收其返回结果
-        cycle_result = pinn.run_training_cycle(
+        pinn.run_training_cycle(
             max_epochs=cycle_max_epochs,
             detect_every=DETECT_EPOCHS,
             collocation_points=current_collocation_points,
-            detection_threshold=0.1
+            detection_threshold=0.1,
+            reserve_data_pools=reserve_data_pools # [新] 传入储备数据池
         )
         
         # 计算本周期实际训练了多少轮
         epochs_this_cycle = (pinn.model.train_state.step or 0) - epochs_before_cycle
         total_epochs_trained += epochs_this_cycle
-
-        # --- [新逻辑] ---
-        # 1. 更新停滞计数器
-        stagnation_this_cycle = cycle_result.get('stagnation_detected', False)
-        if stagnation_this_cycle:
-            consecutive_stagnation_count += 1
-            print(f"INFO: Consecutive stagnation count increased to: {consecutive_stagnation_count}")
-        else:
-            # 任何成功的周期都会重置计数器
-            if consecutive_stagnation_count > 0:
-                print(f"INFO: Training successful, resetting stagnation count from {consecutive_stagnation_count} to 0.")
-            consecutive_stagnation_count = 0
         
         print(f"\nINFO: 本周期实际训练 {epochs_this_cycle} 轮. 总训练进度: {total_epochs_trained}/{TOTAL_EPOCHS}")
         
@@ -681,58 +669,36 @@ def main():
             print("\nINFO: 总训练轮数已达到目标，结束自适应训练。")
             break
 
-        # 2. 检查是否需要执行干预 (注入数据 + 克里金重采样)
-        if consecutive_stagnation_count >= 2:
-            print("\n" + "!"*60)
-            print("!! 连续停滞两次，触发干预机制 !!")
-            print("!"*60)
-
-            # --- 干预措施 1: 注入新数据 (如果还有) ---
-            if reserve_data_pools:
-                print("\nPHASE A: 注入新的储备训练数据...")
-                data_to_inject = reserve_data_pools.pop(0)
-                pinn.inject_new_data(data_to_inject)
-                print("PHASE A: ✅ 新数据注入完成。")
-            else:
-                print("\nWARNING: 已无更多储备数据可注入。")
-
-            # --- 干预措施 2: 克里金引导的自适应采样 ---
-            print("\nPHASE B: 开始克里金引导的自适应采样...")
-            
-            # 残差"侦察"
-            scout_points = (np.random.rand(NUM_RESIDUAL_SCOUT_POINTS, 3) *
-                            (world_max - world_min) + world_min)
-            true_residuals = pinn.compute_pde_residual(scout_points)
-            print(f"    - 真实PDE残差统计 (在 {len(scout_points)} 个侦察点上):")
-            print(f"      - Max={np.max(true_residuals):.4e}, "
-                  f"Min={np.min(true_residuals):.4e}, "
-                  f"Mean={np.mean(true_residuals):.4e}, "
-                  f"Std={np.std(true_residuals):.4e}")
-            
-            # 克里金代理建模
-            kriging.fit(scout_points, true_residuals)
-
-            # 自适应采样
-            num_collocation_to_generate = pinn.data.num_domain
-            print(f"INFO: Dynamically calculated {num_collocation_to_generate} collocation points to generate.")
-
-            current_collocation_points = sampler.generate_new_collocation_points(
-                kriging_model=kriging,
-                num_points_to_sample=num_collocation_to_generate,
-                force_exploration=True  # 因为停滞了，所以强制探索
-            )
-            print("PHASE B: ✅ 新的自适应配置点已生成。")
-
-            # --- 干预后重置计数器 ---
-            print("\nINFO: 干预措施已执行，重置停滞计数器。")
-            consecutive_stagnation_count = 0
-            print("-" * 60)
+        print("\nPHASE 2b: 开始克里金引导的自适应采样...")
         
-        else:
-            # 如果没有达到干预阈值，则不执行克里金采样，继续使用现有配置点
-            print("\nINFO: 未达到干预阈值，下一周期将继续使用当前配置点。")
-            # 在这种情况下，我们不需要更新 current_collocation_points
-            pass
+        # 2b. 残差"侦察"：用当前PINN计算一小批随机点的真实残差
+        scout_points = (np.random.rand(NUM_RESIDUAL_SCOUT_POINTS, 3) *
+                        (world_max - world_min) + world_min)
+        true_residuals = pinn.compute_pde_residual(scout_points)
+        print(f"    - 真实PDE残差统计 (在 {len(scout_points)} 个侦察点上):")
+        print(f"      - Max={np.max(true_residuals):.4e}, "
+              f"Min={np.min(true_residuals):.4e}, "
+              f"Mean={np.mean(true_residuals):.4e}, "
+              f"Std={np.std(true_residuals):.4e}")
+        
+        # 2c. 克里金代理建模：训练Kriging模型来拟合残差分布
+        kriging.fit(scout_points, true_residuals)
+
+        # 2d. 自适应采样：使用训练好的Kriging模型生成下一批"更聪明"的配置点
+        # [修正] 动态计算所需的配置点数量
+        # deepxde 的总训练点 X_train = BC点 + 锚点 + 求解域点
+        # 我们需要填充的部分是 '求解域点'
+        # 注意: 在我们的设定中，num_boundary=0，所以 num_domain 就是我们需要填充的数量
+        num_collocation_to_generate = pinn.data.num_domain
+        
+        print(f"INFO: Dynamically calculated {num_collocation_to_generate} collocation points to generate.")
+
+        current_collocation_points = sampler.generate_new_collocation_points(
+            kriging_model=kriging,
+            num_points_to_sample=num_collocation_to_generate, # [修正] 使用动态计算出的数量
+            force_exploration=stagnation_detected_in_cycle # [新] 将停滞标志传入
+        )
+        print("PHASE 2b: ✅ 新的自适应配置点已生成。")
 
     print("\n" + "="*60)
     print("🎉 训练完成!")

@@ -67,7 +67,7 @@ def testing(df,
     coordinates_test = df[['x', 'y', 'z']].values
     
     num_zeros = (df['target'].values == 0).sum()
-    print("预测矩阵中有",num_zeros,"个0")
+    print("输入的检验矩阵中有",num_zeros,"个0（gpukriging自身检验，外部程序不作考虑）")
 
     target_values_test = df['target'].values.astype(float)
     if style == "cpu_nb":

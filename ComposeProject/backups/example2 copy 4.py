@@ -590,7 +590,7 @@ def main():
     # --- 1. 初始化 ---
     # !! 注意: DOMAIN_BOUNDS 现在仅用于可视化或采样器，实际物理边界由加载的数据决定 !!
     DOMAIN_BOUNDS = np.array([[0., 0., 0.], [1., 1., 1.]]) 
-    TOTAL_EPOCHS = 5000
+    TOTAL_EPOCHS = 2000
     ADAPTIVE_CYCLE_EPOCHS = 500  # 每多少个epoch执行一次自适应调整
     DETECT_EPOCHS = 50 # 每100轮检测一次性能
     DATA_SPLIT_RATIOS = [0.7] + [0.05]*4
