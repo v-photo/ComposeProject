@@ -37,30 +37,30 @@ except ImportError as e:
 # --- [全局] 实验控制开关 ---
 ENABLE_KRIGING = True     # 🔧 控制是否启用克里金引导的重采样
 ENABLE_DATA_INJECTION = False  # 🔧 控制是否启用数据注入策略
-ENABLE_RAPID_IMPROVEMENT_EARLY_STOP = True  # 🔧 控制是否启用快速改善早停
+ENABLE_RAPID_IMPROVEMENT_EARLY_STOP = False  # 🔧 控制是否启用快速改善早停
 
 # --- [全局] 探索率配置 ---
 # 📊 探索率递减策略配置
 # 计算公式: exploration_ratio = max(FINAL, INITIAL - (cycle-1) * DECAY_RATE)
 
-# # 🎯 当前配置 (适中策略)
-# INITIAL_EXPLORATION_RATIO = 0.20    # 初始探索率 (第1周期): 20%
-# FINAL_EXPLORATION_RATIO = 0.05      # 最终探索率 (收敛值): 5%
-# EXPLORATION_DECAY_RATE = 0.02       # 每周期递减率: 2%
+# 🎯 当前配置 (适中策略)
+INITIAL_EXPLORATION_RATIO = 0.20    # 初始探索率 (第1周期): 20%
+FINAL_EXPLORATION_RATIO = 0.05      # 最终探索率 (收敛值): 5%
+EXPLORATION_DECAY_RATE = 0.02       # 每周期递减率: 2%
 # 👆 该配置下：第1周期20% → 第8周期5% → 之后保持5%
 
 # 💡 其他常用配置示例 (取消注释使用):
 # 
-# 🚀 激进策略 (快速从探索转向利用)
+# # 🚀 激进策略 (快速从探索转向利用)
 # INITIAL_EXPLORATION_RATIO = 0.25    # 25%
 # FINAL_EXPLORATION_RATIO = 0.02      # 2%
 # EXPLORATION_DECAY_RATE = 0.05       # 5%
-# # # 效果：第1周期25% → 第5周期5% → 第6周期2%
+# # 效果：第1周期25% → 第5周期5% → 第6周期2%
 #
-# 🐌 保守策略 (长期保持探索)
-INITIAL_EXPLORATION_RATIO = 0.50    # 50%
-FINAL_EXPLORATION_RATIO = 0.018      # 18%
-EXPLORATION_DECAY_RATE = 0.04       # 4%
+# # 🐌 保守策略 (长期保持探索)
+# INITIAL_EXPLORATION_RATIO = 0.15    # 15%
+# FINAL_EXPLORATION_RATIO = 0.08      # 8%
+# EXPLORATION_DECAY_RATE = 0.01       # 1%
 # # 效果：第1周期15% → 第8周期8% → 之后保持8%
 #
 # # 🎯 精准策略 (高利用率)
@@ -690,7 +690,7 @@ def main():
     # --- 1. 初始化 ---
     # !! 注意: DOMAIN_BOUNDS 现在仅用于可视化或采样器，实际物理边界由加载的数据决定 !!
     DOMAIN_BOUNDS = np.array([[0., 0., 0.], [1., 1., 1.]]) 
-    TOTAL_EPOCHS = 1000
+    TOTAL_EPOCHS = 1200
     ADAPTIVE_CYCLE_EPOCHS = 200  # 每多少个epoch执行一次自适应调整
     DETECT_EPOCHS = 100 # 每100轮检测一次性能 [修正注释]
     DATA_SPLIT_RATIOS = [0.7] + [0.05]*6
@@ -723,11 +723,11 @@ def main():
     # --- 数据加载参数 ---
     DATA_PATH = "PINN/DATA.xlsx"
     SPACE_DIMS = np.array([20.0, 10.0, 10.0])
-    NUM_SAMPLES = 50
+    NUM_SAMPLES = 100
     
     # --- 模型训练参数 ---
     NUM_COLLOCATION_POINTS = 4096
-    NUM_RESIDUAL_SCOUT_POINTS = 5000 # 用于侦察的点数，远少于训练配置点数
+    NUM_RESIDUAL_SCOUT_POINTS = 5000 # 用于侦察的点数，远少于训练点数
 
     # 1. 数据加载
     data_loader = DummyDataLoader(
@@ -795,32 +795,6 @@ def main():
         print(f"\nINFO: 本周期实际训练 {epochs_this_cycle} 轮. 总训练进度: {total_epochs_trained}/{TOTAL_EPOCHS}")
         print(f"🔢 周期计数: 第 {cycle_counter} 个周期完成")
         
-        # 🔍 新增：性能分析 - 记录当前周期的最终MRE
-        current_mre = pinn.model.train_state.metrics_test[-1] if pinn.model.train_state.metrics_test else float('inf')
-        print(f"📊 周期性能: 第{cycle_counter}周期结束时MRE = {current_mre:.6f} (训练{epochs_this_cycle}轮)")
-        
-        # 🔍 如果是第2+周期，计算改善率
-        if cycle_counter > 1 and hasattr(main, 'previous_cycle_mre'):
-            improvement = main.previous_cycle_mre - current_mre
-            improvement_rate = improvement / main.previous_cycle_mre if main.previous_cycle_mre > 0 else 0
-            print(f"    └─ 相比上周期改善: {improvement:.6f} ({improvement_rate:.2%})")
-            
-            # 评估收敛速度
-            if improvement_rate > 0.1:
-                print(f"    🚀 快速收敛! 改善率 > 10%")
-            elif improvement_rate > 0.05:
-                print(f"    📈 良好收敛! 改善率 > 5%")
-            elif improvement_rate > 0:
-                print(f"    📊 缓慢改善")
-            else:
-                print(f"    ⚠️  性能下降或停滞")
-        
-        # 保存当前MRE供下一周期比较
-        if not hasattr(main, 'previous_cycle_mre'):
-            main.previous_cycle_mre = current_mre
-        else:
-            main.previous_cycle_mre = current_mre
-
         # 如果已经训练够了，就提前结束主循环
         if total_epochs_trained >= TOTAL_EPOCHS:
             print("\nINFO: 总训练轮数已达到目标，结束自适应训练。")
@@ -881,12 +855,7 @@ def main():
                       f"Mean={np.mean(true_residuals):.4e}, "
                       f"Std={np.std(true_residuals):.4e}")
                 
-                # 🔍 残差质量分析
-                high_residual_ratio = np.mean(true_residuals > np.mean(true_residuals) * 2)
-                print(f"      - 高残差点比例: {high_residual_ratio:.1%} (残差>2倍均值)")
-                
                 # 克里金代理建模
-                print("    🔧 开始训练克里金代理模型...")
                 kriging.fit(scout_points, true_residuals)
 
                 # 自适应采样
@@ -901,17 +870,6 @@ def main():
                     cycle_number=cycle_counter
                 )
                 print("PHASE B: ✅ 新的自适应配置点已生成。")
-                
-                # 🔍 新增：评估新配置点的预期残差质量
-                predicted_residuals_new = kriging.predict(current_collocation_points)
-                old_residuals_sample = pinn.compute_pde_residual(current_collocation_points[:100])  # 采样100个点评估
-                print(f"    📊 新配置点质量评估:")
-                print(f"      - 克里金预测残差: Mean={np.mean(predicted_residuals_new):.4e}, Max={np.max(predicted_residuals_new):.4e}")
-                print(f"      - 实际残差(采样): Mean={np.mean(old_residuals_sample):.4e}, Max={np.max(old_residuals_sample):.4e}")
-                residual_prediction_accuracy = np.corrcoef(
-                    predicted_residuals_new[:100], old_residuals_sample
-                )[0,1] if len(old_residuals_sample) == 100 else 0
-                print(f"      - 克里金预测准确度: {residual_prediction_accuracy:.3f} (相关系数)")
                 
                 # [新增] 记录周期性克里金应用事件
                 important_events.append((
@@ -1036,33 +994,6 @@ def main():
         print(f"   训练点效率比: {efficiency_ratio:.2f}x (自适应PINN vs 基线PINN)")
     print(f"   独立测试集大小: {len(test_data)} 点")
     
-    # 🔍 新增：收敛效率分析
-    print(f"\n⚡ 收敛效率对比:")
-    if mre_adaptive < mre_baseline:
-        improvement = (mre_baseline - mre_adaptive) / mre_baseline
-        print(f"   🎯 自适应PINN表现更优: 相对改善 {improvement:.2%}")
-        print(f"   💡 克里金引导策略有效!")
-    elif mre_adaptive > mre_baseline:
-        degradation = (mre_adaptive - mre_baseline) / mre_baseline  
-        print(f"   ⚠️  自适应PINN表现略差: 相对下降 {degradation:.2%}")
-        print(f"   🔧 建议调整探索率策略或增加训练轮数")
-    else:
-        print(f"   📊 两种方法性能相当")
-    
-    # 计算收敛速度指标
-    adaptive_epochs_to_convergence = len(pinn.mre_history)
-    baseline_epochs_to_convergence = len(pinn_baseline.mre_history)
-    
-    print(f"\n🏃‍♂️ 收敛速度分析:")
-    print(f"   自适应PINN: {adaptive_epochs_to_convergence} 次评估到达 MRE={mre_adaptive:.6%}")
-    print(f"   基线PINN: {baseline_epochs_to_convergence} 次评估到达 MRE={mre_baseline:.6%}")
-    
-    if adaptive_epochs_to_convergence < baseline_epochs_to_convergence:
-        speed_improvement = (baseline_epochs_to_convergence - adaptive_epochs_to_convergence) / baseline_epochs_to_convergence
-        print(f"   🚀 自适应PINN收敛更快: 减少 {speed_improvement:.1%} 的评估次数")
-    else:
-        print(f"   📊 收敛速度相当或需要更多评估")
-
     # 输出重要事件摘要
     if important_events:
         print(f"\n📋 训练过程重要事件摘要:")

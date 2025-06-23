@@ -34,47 +34,6 @@ except ImportError as e:
 #  这里的骨架是为了清晰地展示"克里金引导的自适应PINN训练"这一技术路线。
 # =================================================================================
 
-# --- [全局] 实验控制开关 ---
-ENABLE_KRIGING = True     # 🔧 控制是否启用克里金引导的重采样
-ENABLE_DATA_INJECTION = False  # 🔧 控制是否启用数据注入策略
-ENABLE_RAPID_IMPROVEMENT_EARLY_STOP = True  # 🔧 控制是否启用快速改善早停
-
-# --- [全局] 探索率配置 ---
-# 📊 探索率递减策略配置
-# 计算公式: exploration_ratio = max(FINAL, INITIAL - (cycle-1) * DECAY_RATE)
-
-# # 🎯 当前配置 (适中策略)
-# INITIAL_EXPLORATION_RATIO = 0.20    # 初始探索率 (第1周期): 20%
-# FINAL_EXPLORATION_RATIO = 0.05      # 最终探索率 (收敛值): 5%
-# EXPLORATION_DECAY_RATE = 0.02       # 每周期递减率: 2%
-# 👆 该配置下：第1周期20% → 第8周期5% → 之后保持5%
-
-# 💡 其他常用配置示例 (取消注释使用):
-# 
-# 🚀 激进策略 (快速从探索转向利用)
-# INITIAL_EXPLORATION_RATIO = 0.25    # 25%
-# FINAL_EXPLORATION_RATIO = 0.02      # 2%
-# EXPLORATION_DECAY_RATE = 0.05       # 5%
-# # # 效果：第1周期25% → 第5周期5% → 第6周期2%
-#
-# 🐌 保守策略 (长期保持探索)
-INITIAL_EXPLORATION_RATIO = 0.50    # 50%
-FINAL_EXPLORATION_RATIO = 0.018      # 18%
-EXPLORATION_DECAY_RATE = 0.04       # 4%
-# # 效果：第1周期15% → 第8周期8% → 之后保持8%
-#
-# # 🎯 精准策略 (高利用率)
-# INITIAL_EXPLORATION_RATIO = 0.30    # 30%
-# FINAL_EXPLORATION_RATIO = 0.03      # 3%
-# EXPLORATION_DECAY_RATE = 0.03       # 3%
-# # 效果：第1周期30% → 第10周期3% → 之后保持3%
-
-# 四种实验模式:
-# ENABLE_KRIGING=False, ENABLE_DATA_INJECTION=False: 仅周期性重启 (无自适应策略)
-# ENABLE_KRIGING=False, ENABLE_DATA_INJECTION=True:  仅数据注入策略
-# ENABLE_KRIGING=True,  ENABLE_DATA_INJECTION=False: 仅克里金重采样策略  
-# ENABLE_KRIGING=True,  ENABLE_DATA_INJECTION=True:  完整自适应PINN
-
 class DummyDataLoader:
     """
     一个数据加载器，用于从外部文件加载初始训练数据(替代原有的DummyDataLoader)。
@@ -85,7 +44,7 @@ class DummyDataLoader:
         self.num_samples = num_samples
         print(f"INFO: (DataLoader) Initialized with data_path='{self.data_path}'")
 
-    def get_training_data(self, split_ratios: list = None, test_set_size: int = None):
+    def get_training_data(self, split_ratios: list = None):
         """
         加载、处理并采样稀疏训练点，并根据指定的比例列表进行分割。
         
@@ -97,7 +56,6 @@ class DummyDataLoader:
                 - 10% 作为第二个储备集
                 - 剩余的 10% 将作为测试集。
                 如果为 None，则使用默认的 80/20 训练/测试分割。
-            test_set_size (int, optional): 如果指定，将生成独立的测试集而非从训练数据分割。
         """
         # ... (前面加载和采样数据的部分保持不变) ...
         print(f"INFO: (DataLoader) Loading raw data from {self.data_path}...")
@@ -123,23 +81,13 @@ class DummyDataLoader:
         # 将坐标和值合并成 [x, y, z, value] 格式
         all_sampled_data = np.hstack([train_points, train_values.reshape(-1, 1)])
         
-        # [新增] 生成独立测试集（如果指定）
-        if test_set_size is not None:
-            print(f"INFO: (DataLoader) Generating independent test set of size {test_set_size}...")
-            test_set = self._generate_independent_test_set(dose_data, test_set_size)
-        else:
-            test_set = None  # 将在下面的分割逻辑中处理
-        
         # [新逻辑] 使用可配置的分割策略
         if split_ratios is None:
             # 默认行为：80/20 分割
-            if test_set is None:
-                main_train_set, test_set = train_test_split(all_sampled_data, test_size=0.2, random_state=42)
-            else:
-                main_train_set = all_sampled_data  # 全部用作训练数据
+            main_train_set, test_set = train_test_split(all_sampled_data, test_size=0.2, random_state=42)
             reserve_pools = []
         else:
-            if test_set is None and sum(split_ratios) >= 1.0:
+            if sum(split_ratios) >= 1.0:
                 raise ValueError("split_ratios 的总和必须小于 1.0，以便为测试集留出空间。")
 
             remaining_data = all_sampled_data
@@ -156,10 +104,7 @@ class DummyDataLoader:
 
             main_train_set = data_pools[0]
             reserve_pools = data_pools[1:]
-            
-            # 如果没有独立测试集，则使用剩余数据
-            if test_set is None:
-                test_set = remaining_data
+            test_set = remaining_data # 剩下的所有数据都作为测试集
         
         print(f"INFO: (DataLoader) ✅ Split data into: Main training ({len(main_train_set)}), Test ({len(test_set)}), Reserve Pools ({len(reserve_pools)} pools).")
         if reserve_pools:
@@ -167,29 +112,6 @@ class DummyDataLoader:
                 print(f"    - Reserve Pool {i+1}: {len(pool)} points")
 
         return main_train_set, reserve_pools, test_set, dose_data
-
-    def _generate_independent_test_set(self, dose_data: dict, test_set_size: int):
-        """
-        生成完全独立于训练数据的测试集，在整个物理域内均匀采样。
-        
-        Args:
-            dose_data (dict): 包含物理域边界的数据字典
-            test_set_size (int): 测试集大小
-            
-        Returns:
-            np.ndarray: 测试集数据 [x, y, z, value]
-        """
-        # 使用 DataLoader.sample_training_points 在整个域内采样测试点
-        test_points, test_values, _ = DataLoader.sample_training_points(
-            dose_data, 
-            num_samples=test_set_size,
-            sampling_strategy='uniform',  # 使用均匀采样
-        )
-        
-        # 合并为 [x, y, z, value] 格式
-        test_set = np.hstack([test_points, test_values.reshape(-1, 1)])
-        print(f"INFO: (DataLoader) ✅ Generated independent test set with {len(test_set)} points.")
-        return test_set
 
 class GPUKriging:
     """
@@ -516,8 +438,8 @@ class PINNModel:
                     self.model.restore(stopper.best_model_path, verbose=0) 
                     should_exit_cycle = True
 
-            # 条件2: 快速提升 (Rapid Improvement) - 🔧 可选择是否启用
-            if ENABLE_RAPID_IMPROVEMENT_EARLY_STOP and stopper.should_stop:
+            # 条件2: 快速提升 (Rapid Improvement) - 我们的旧早停逻辑
+            if stopper.should_stop:
                 print(f"\nINFO: (PINNModel) 📈 Rapid improvement! Capitalizing on gains and forcing new resampling.")
                 should_exit_cycle = True
             
@@ -641,25 +563,23 @@ class AdaptiveSampler:
         self,
         kriging_model: GPUKriging,
         num_points_to_sample: int,
-        cycle_number: int = 1
-    ) -> tuple[np.ndarray, float]:
+        force_exploration: bool = False
+    ) -> np.ndarray:
         """
         使用Kriging模型引导生成新的配置点。
         Args:
             kriging_model: 训练好的残差代理模型。
             num_points_to_sample: 需要生成的总点数。
-            cycle_number: 当前是第几个自适应周期，用于动态调整探索策略。
+            force_exploration: 是否因模型停滞而强制增加探索比例。
         Returns:
-            tuple: (新的配置点集, 使用的探索率)
+            np.ndarray: 新的配置点集。
         """
-        # [新逻辑] 基于周期数和全局配置计算探索率
-        exploration_ratio = max(
-            FINAL_EXPLORATION_RATIO,
-            INITIAL_EXPLORATION_RATIO - (cycle_number - 1) * EXPLORATION_DECAY_RATE
-        )
-        
-        print(f"INFO: (AdaptiveSampler) 周期性克里金重采样 (第{cycle_number}次)")
-        print(f"      探索率: {exploration_ratio:.1%} (初始:{INITIAL_EXPLORATION_RATIO:.1%} → 最终:{FINAL_EXPLORATION_RATIO:.1%})")
+        # [新逻辑] 根据是否停滞来动态调整探索率
+        if force_exploration:
+            exploration_ratio = 0.3 # 停滞时，大幅增加随机探索
+            print(f"INFO: (AdaptiveSampler) Stagnation detected! Increasing exploration ratio to {exploration_ratio:.0%}.")
+        else:
+            exploration_ratio = 0.1 # 正常情况下的探索率
 
         # 1. 使用Kriging代理模型预测所有候选点的残差
         predicted_residuals = kriging_model.predict(self.candidate_points)
@@ -681,44 +601,23 @@ class AdaptiveSampler:
 
         print(f"INFO: (AdaptiveSampler) Generated {num_exploitation_points} exploitation points and {num_exploration_points} exploration points.")
         
-        return np.vstack([exploitation_points, exploration_points]), exploration_ratio
+        return np.vstack([exploitation_points, exploration_points])
 
 def main():
     """
     主函数，编排整个"克里金引导的自适应PINN训练"流程。
     """
+    print("\n" + "="*60)
+    print("🚀 开始执行：克里金引导的自适应PINN训练")
+    print("="*60 + "\n")
+
     # --- 1. 初始化 ---
     # !! 注意: DOMAIN_BOUNDS 现在仅用于可视化或采样器，实际物理边界由加载的数据决定 !!
     DOMAIN_BOUNDS = np.array([[0., 0., 0.], [1., 1., 1.]]) 
-    TOTAL_EPOCHS = 1000
-    ADAPTIVE_CYCLE_EPOCHS = 200  # 每多少个epoch执行一次自适应调整
-    DETECT_EPOCHS = 100 # 每100轮检测一次性能 [修正注释]
+    TOTAL_EPOCHS = 2400
+    ADAPTIVE_CYCLE_EPOCHS = 400  # 每多少个epoch执行一次自适应调整
+    DETECT_EPOCHS = 100 # 每50轮检测一次性能 [修正注释]
     DATA_SPLIT_RATIOS = [0.7] + [0.05]*6
-
-    print("\n" + "="*60)
-    print("🚀 开始执行：自适应PINN训练实验")
-    print("="*60)
-    print(f"📋 实验配置:")
-    print(f"   - 克里金引导采样: {'✅ 启用' if ENABLE_KRIGING else '❌ 禁用'}")
-    if ENABLE_KRIGING:
-        print(f"     └─ 探索率策略: {INITIAL_EXPLORATION_RATIO:.1%} → {FINAL_EXPLORATION_RATIO:.1%} (每周期-{EXPLORATION_DECAY_RATE:.1%})")
-    print(f"   - 数据注入策略: {'✅ 启用' if ENABLE_DATA_INJECTION else '❌ 禁用'}")
-    print(f"   - 快速改善早停: {'✅ 启用' if ENABLE_RAPID_IMPROVEMENT_EARLY_STOP else '❌ 禁用'}")
-    print(f"   - 总训练轮数: {TOTAL_EPOCHS}")
-    print(f"   - 干预周期: 每 {ADAPTIVE_CYCLE_EPOCHS} 轮")
-    
-    # 确定实验类型
-    if ENABLE_KRIGING and ENABLE_DATA_INJECTION:
-        exp_type = "完整自适应PINN (数据注入 + 克里金重采样)"
-    elif ENABLE_KRIGING and not ENABLE_DATA_INJECTION:
-        exp_type = "仅克里金重采样策略"
-    elif not ENABLE_KRIGING and ENABLE_DATA_INJECTION:
-        exp_type = "仅数据注入策略"
-    else:
-        exp_type = "仅周期性重启 (无自适应策略)"
-    
-    print(f"   - 实验类型: {exp_type}")
-    print("="*60 + "\n")
     
     # --- 数据加载参数 ---
     DATA_PATH = "PINN/DATA.xlsx"
@@ -727,7 +626,7 @@ def main():
     
     # --- 模型训练参数 ---
     NUM_COLLOCATION_POINTS = 4096
-    NUM_RESIDUAL_SCOUT_POINTS = 5000 # 用于侦察的点数，远少于训练配置点数
+    NUM_RESIDUAL_SCOUT_POINTS = 5000 # 用于侦察的点数，远少于训练点数
 
     # 1. 数据加载
     data_loader = DummyDataLoader(
@@ -736,8 +635,7 @@ def main():
         num_samples=NUM_SAMPLES
     )
     main_train_set, reserve_data_pools, test_data, dose_data = data_loader.get_training_data(
-        split_ratios=DATA_SPLIT_RATIOS,
-        test_set_size=300  # [新增] 独立测试集大小
+        split_ratios=DATA_SPLIT_RATIOS
     )
 
     # 2. 模型和采样器初始化
@@ -760,7 +658,7 @@ def main():
     # --- 3. [修正] 训练循环 ---
     # 使用 while 循环来确保总训练轮数达标
     total_epochs_trained = 0
-    cycle_counter = 0  # 🔧 新增：周期计数器，用于可靠的克里金触发
+    consecutive_stagnation_count = 0 # [新] 连续停滞计数器
     
     # [新增] 重要事件记录列表，用于图表标注
     important_events = []  # 格式: [(epoch, event_type, description), ...]
@@ -790,156 +688,93 @@ def main():
         # 计算本周期实际训练了多少轮
         epochs_this_cycle = (pinn.model.train_state.step or 0) - epochs_before_cycle
         total_epochs_trained += epochs_this_cycle
-        cycle_counter += 1  # 🔧 增加周期计数
 
-        print(f"\nINFO: 本周期实际训练 {epochs_this_cycle} 轮. 总训练进度: {total_epochs_trained}/{TOTAL_EPOCHS}")
-        print(f"🔢 周期计数: 第 {cycle_counter} 个周期完成")
-        
-        # 🔍 新增：性能分析 - 记录当前周期的最终MRE
-        current_mre = pinn.model.train_state.metrics_test[-1] if pinn.model.train_state.metrics_test else float('inf')
-        print(f"📊 周期性能: 第{cycle_counter}周期结束时MRE = {current_mre:.6f} (训练{epochs_this_cycle}轮)")
-        
-        # 🔍 如果是第2+周期，计算改善率
-        if cycle_counter > 1 and hasattr(main, 'previous_cycle_mre'):
-            improvement = main.previous_cycle_mre - current_mre
-            improvement_rate = improvement / main.previous_cycle_mre if main.previous_cycle_mre > 0 else 0
-            print(f"    └─ 相比上周期改善: {improvement:.6f} ({improvement_rate:.2%})")
-            
-            # 评估收敛速度
-            if improvement_rate > 0.1:
-                print(f"    🚀 快速收敛! 改善率 > 10%")
-            elif improvement_rate > 0.05:
-                print(f"    📈 良好收敛! 改善率 > 5%")
-            elif improvement_rate > 0:
-                print(f"    📊 缓慢改善")
-            else:
-                print(f"    ⚠️  性能下降或停滞")
-        
-        # 保存当前MRE供下一周期比较
-        if not hasattr(main, 'previous_cycle_mre'):
-            main.previous_cycle_mre = current_mre
+        # --- [新逻辑] ---
+        # 1. 更新停滞计数器
+        stagnation_this_cycle = cycle_result.get('stagnation_detected', False)
+        if stagnation_this_cycle:
+            consecutive_stagnation_count += 1
+            print(f"INFO: Consecutive stagnation count increased to: {consecutive_stagnation_count}")
         else:
-            main.previous_cycle_mre = current_mre
-
+            # 任何成功的周期都会重置计数器
+            if consecutive_stagnation_count > 0:
+                print(f"INFO: Training successful, resetting stagnation count from {consecutive_stagnation_count} to 0.")
+            consecutive_stagnation_count = 0
+        
+        print(f"\nINFO: 本周期实际训练 {epochs_this_cycle} 轮. 总训练进度: {total_epochs_trained}/{TOTAL_EPOCHS}")
+        
         # 如果已经训练够了，就提前结束主循环
         if total_epochs_trained >= TOTAL_EPOCHS:
             print("\nINFO: 总训练轮数已达到目标，结束自适应训练。")
             break
 
-        # 2. 🔧 改用周期计数器进行可靠的周期性干预触发
-        should_trigger_intervention = cycle_counter > 0  # 每个周期都检查是否需要干预
-        print(f"🔍 干预触发检查: 周期 {cycle_counter} 完成，应该触发干预 → {should_trigger_intervention}")
-        
-        if should_trigger_intervention:
+        # 2. 检查是否需要执行干预 (注入数据 + 克里金重采样)
+        if consecutive_stagnation_count >= 2:
             print("\n" + "!"*60)
-            
-            # 根据启用的策略确定干预类型描述
-            intervention_types = []
-            if ENABLE_DATA_INJECTION:
-                intervention_types.append("数据注入")
-            if ENABLE_KRIGING:
-                intervention_types.append("克里金重采样")
-            
-            if intervention_types:
-                intervention_desc = " + ".join(intervention_types)
-                print(f"!! 训练达到 {total_epochs_trained} 轮，触发周期性干预: {intervention_desc} !!")
-            else:
-                print(f"!! 训练达到 {total_epochs_trained} 轮，触发周期性重启 (无自适应策略) !!")
+            print("!! 连续停滞两次，触发干预机制 !!")
             print("!"*60)
 
-            # --- 干预措施 1: 注入新数据 (如果启用且还有数据) ---
-            if ENABLE_DATA_INJECTION:
-                if reserve_data_pools:
-                    print("\nPHASE A: 注入新的储备训练数据...")
-                    data_injection_epoch = pinn.model.train_state.step or 0
-                    data_to_inject = reserve_data_pools.pop(0)
-                    pinn.inject_new_data(data_to_inject)
-                    print("PHASE A: ✅ 新数据注入完成。")
-                    
-                    # [新增] 记录数据注入事件  
-                    important_events.append((
-                        data_injection_epoch, 
-                        'data_injection', 
-                        f'周期性数据注入 (+{len(data_to_inject)}点, 第{cycle_counter}次)'
-                    ))
-                else:
-                    print("\nWARNING: 数据注入已启用，但已无更多储备数据可注入。")
-            else:
-                print("\nPHASE A: 数据注入已禁用，跳过此阶段。")
-
-            # --- 干预措施 2: 克里金引导的自适应采样 (如果启用) ---
-            if ENABLE_KRIGING:
-                print("\nPHASE B: 开始克里金引导的自适应采样...")
+            # --- 干预措施 1: 注入新数据 (如果还有) ---
+            if reserve_data_pools:
+                print("\nPHASE A: 注入新的储备训练数据...")
+                data_injection_epoch = pinn.model.train_state.step or 0
+                data_to_inject = reserve_data_pools.pop(0)
+                pinn.inject_new_data(data_to_inject)
+                print("PHASE A: ✅ 新数据注入完成。")
                 
-                # 残差"侦察"
-                scout_points = (np.random.rand(NUM_RESIDUAL_SCOUT_POINTS, 3) *
-                                (world_max - world_min) + world_min)
-                true_residuals = pinn.compute_pde_residual(scout_points)
-                print(f"    - 真实PDE残差统计 (在 {len(scout_points)} 个侦察点上):")
-                print(f"      - Max={np.max(true_residuals):.4e}, "
-                      f"Min={np.min(true_residuals):.4e}, "
-                      f"Mean={np.mean(true_residuals):.4e}, "
-                      f"Std={np.std(true_residuals):.4e}")
-                
-                # 🔍 残差质量分析
-                high_residual_ratio = np.mean(true_residuals > np.mean(true_residuals) * 2)
-                print(f"      - 高残差点比例: {high_residual_ratio:.1%} (残差>2倍均值)")
-                
-                # 克里金代理建模
-                print("    🔧 开始训练克里金代理模型...")
-                kriging.fit(scout_points, true_residuals)
-
-                # 自适应采样
-                kriging_epoch = pinn.model.train_state.step or 0
-                num_collocation_to_generate = pinn.data.num_domain
-                print(f"INFO: Dynamically calculated {num_collocation_to_generate} collocation points to generate.")
-
-                # 🔧 使用周期计数器作为周期编号
-                current_collocation_points, used_exploration_ratio = sampler.generate_new_collocation_points(
-                    kriging_model=kriging,
-                    num_points_to_sample=num_collocation_to_generate,
-                    cycle_number=cycle_counter
-                )
-                print("PHASE B: ✅ 新的自适应配置点已生成。")
-                
-                # 🔍 新增：评估新配置点的预期残差质量
-                predicted_residuals_new = kriging.predict(current_collocation_points)
-                old_residuals_sample = pinn.compute_pde_residual(current_collocation_points[:100])  # 采样100个点评估
-                print(f"    📊 新配置点质量评估:")
-                print(f"      - 克里金预测残差: Mean={np.mean(predicted_residuals_new):.4e}, Max={np.max(predicted_residuals_new):.4e}")
-                print(f"      - 实际残差(采样): Mean={np.mean(old_residuals_sample):.4e}, Max={np.max(old_residuals_sample):.4e}")
-                residual_prediction_accuracy = np.corrcoef(
-                    predicted_residuals_new[:100], old_residuals_sample
-                )[0,1] if len(old_residuals_sample) == 100 else 0
-                print(f"      - 克里金预测准确度: {residual_prediction_accuracy:.3f} (相关系数)")
-                
-                # [新增] 记录周期性克里金应用事件
+                # [新增] 记录数据注入事件
                 important_events.append((
-                    kriging_epoch, 
-                    'kriging_resampling', 
-                    f'周期性克里金重采样 (第{cycle_counter}次, 探索率:{used_exploration_ratio:.1%})'
+                    data_injection_epoch, 
+                    'data_injection', 
+                    f'数据注入 (+{len(data_to_inject)}点)'
                 ))
             else:
-                print("\nPHASE B: 克里金重采样已禁用，跳过此阶段。")
-                print("INFO: 配置点保持不变，仅依靠数据注入策略。")
+                print("\nWARNING: 已无更多储备数据可注入。")
 
-            # --- 周期性干预完成 ---
-            # 确定干预类型描述
-            if ENABLE_KRIGING and ENABLE_DATA_INJECTION:
-                intervention_desc = "数据注入 + 克里金重采样"
-            elif ENABLE_KRIGING and not ENABLE_DATA_INJECTION:
-                intervention_desc = "仅克里金重采样"
-            elif not ENABLE_KRIGING and ENABLE_DATA_INJECTION:
-                intervention_desc = "仅数据注入"
-            else:
-                intervention_desc = "仅周期性重启"
+            # --- 干预措施 2: 克里金引导的自适应采样 ---
+            print("\nPHASE B: 开始克里金引导的自适应采样...")
             
-            print(f"\nINFO: 第 {cycle_counter} 次周期性干预完成 ({intervention_desc})。")
+            # 残差"侦察"
+            scout_points = (np.random.rand(NUM_RESIDUAL_SCOUT_POINTS, 3) *
+                            (world_max - world_min) + world_min)
+            true_residuals = pinn.compute_pde_residual(scout_points)
+            print(f"    - 真实PDE残差统计 (在 {len(scout_points)} 个侦察点上):")
+            print(f"      - Max={np.max(true_residuals):.4e}, "
+                  f"Min={np.min(true_residuals):.4e}, "
+                  f"Mean={np.mean(true_residuals):.4e}, "
+                  f"Std={np.std(true_residuals):.4e}")
+            
+            # 克里金代理建模
+            kriging.fit(scout_points, true_residuals)
+
+            # 自适应采样
+            kriging_epoch = pinn.model.train_state.step or 0
+            num_collocation_to_generate = pinn.data.num_domain
+            print(f"INFO: Dynamically calculated {num_collocation_to_generate} collocation points to generate.")
+
+            current_collocation_points = sampler.generate_new_collocation_points(
+                kriging_model=kriging,
+                num_points_to_sample=num_collocation_to_generate,
+                force_exploration=True  # 因为停滞了，所以强制探索
+            )
+            print("PHASE B: ✅ 新的自适应配置点已生成。")
+            
+            # [新增] 记录克里金应用事件
+            important_events.append((
+                kriging_epoch, 
+                'kriging_resampling', 
+                '克里金引导重采样'
+            ))
+
+            # --- 干预后重置计数器 ---
+            print("\nINFO: 干预措施已执行，重置停滞计数器。")
+            consecutive_stagnation_count = 0
             print("-" * 60)
         
         else:
-            # 🔧 这个分支现在应该不会被执行，因为每个周期都会触发干预检查
-            print(f"\n⚠️  未预期的情况：周期 {cycle_counter} 不应该跳过干预检查！")
+            # 如果没有达到干预阈值，则不执行克里金采样，继续使用现有配置点
+            print("\nINFO: 未达到干预阈值，下一周期将继续使用当前配置点。")
+            # 在这种情况下，我们不需要更新 current_collocation_points
             pass
 
     print("\n" + "="*60)
@@ -951,16 +786,10 @@ def main():
     print("🚀 开始训练原始PINN作为对比基线")
     print("="*60 + "\n")
 
-    # [修正] 为基线模型准备与自适应PINN相同的训练数据
-    # 获取自适应PINN实际使用的训练数据，确保公平对比
-    adaptive_training_data = pinn.data.bcs[0].points  # 自适应PINN的实际训练点坐标
-    adaptive_training_values = pinn.data.bcs[0].values.cpu().numpy()  # 对应的值（对数尺度）
-    
-    # 将对数尺度的值转换回线性尺度，然后合并为 [x,y,z,value] 格式
-    adaptive_training_linear_values = np.exp(adaptive_training_values)
-    full_training_data = np.hstack([adaptive_training_data, adaptive_training_linear_values])
-    
-    print(f"INFO: 基线PINN将使用与自适应PINN相同的 {len(full_training_data)} 个训练点")
+    # [新] 为基线模型准备完整的训练数据
+    # 直接将第一次加载时分割好的所有数据块合并起来
+    all_training_blocks = [main_train_set] + reserve_data_pools
+    full_training_data = np.vstack(all_training_blocks)
 
     pinn_baseline = PINNModel(
         dose_data=dose_data, 
@@ -1006,63 +835,13 @@ def main():
 
     mre_adaptive = calculate_mre(true_values, adaptive_preds)
     mre_baseline = calculate_mre(true_values, baseline_preds)
-    
-    # [新增] 获取两个模型的训练点数
-    adaptive_train_points = pinn.data.bcs[0].points.shape[0]
-    baseline_train_points = pinn_baseline.data.bcs[0].points.shape[0]
 
-    # 动态模型名称
-    if ENABLE_KRIGING and ENABLE_DATA_INJECTION:
-        adaptive_model_name = "完整自适应PINN"
-    elif ENABLE_KRIGING and not ENABLE_DATA_INJECTION:
-        adaptive_model_name = "仅克里金重采样PINN"
-    elif not ENABLE_KRIGING and ENABLE_DATA_INJECTION:
-        adaptive_model_name = "仅数据注入PINN"
-    else:
-        adaptive_model_name = "周期性重启PINN"
+    print(f"\n{'模型':<28} | {'平均相对误差 (MRE) on Test Set':<30}")
+    print("-" * 65)
+    print(f"{'Kriging引导的自适应PINN':<28} | {mre_adaptive:<30.6%}")
+    print(f"{'原始PINN (固定采样)':<28} | {mre_baseline:<30.6%}")
+    print("-" * 65)
     
-    print(f"\n{'模型':<32} | {'平均相对误差 (MRE)':<20} | {'训练点数':<12}")
-    print("-" * 74)
-    print(f"{adaptive_model_name:<32} | {mre_adaptive:<20.6%} | {adaptive_train_points:<12d}")
-    print(f"{'原始PINN (固定采样)':<32} | {mre_baseline:<20.6%} | {baseline_train_points:<12d}")
-    print("-" * 74)
-    
-    # [新增] 训练效率对比
-    print(f"\n📊 训练效率分析:")
-    print(f"   自适应PINN使用了 {adaptive_train_points} 个训练点，达到 MRE = {mre_adaptive:.6%}")
-    print(f"   基线PINN使用了 {baseline_train_points} 个训练点，达到 MRE = {mre_baseline:.6%}")
-    if adaptive_train_points != baseline_train_points:
-        efficiency_ratio = baseline_train_points / adaptive_train_points
-        print(f"   训练点效率比: {efficiency_ratio:.2f}x (自适应PINN vs 基线PINN)")
-    print(f"   独立测试集大小: {len(test_data)} 点")
-    
-    # 🔍 新增：收敛效率分析
-    print(f"\n⚡ 收敛效率对比:")
-    if mre_adaptive < mre_baseline:
-        improvement = (mre_baseline - mre_adaptive) / mre_baseline
-        print(f"   🎯 自适应PINN表现更优: 相对改善 {improvement:.2%}")
-        print(f"   💡 克里金引导策略有效!")
-    elif mre_adaptive > mre_baseline:
-        degradation = (mre_adaptive - mre_baseline) / mre_baseline  
-        print(f"   ⚠️  自适应PINN表现略差: 相对下降 {degradation:.2%}")
-        print(f"   🔧 建议调整探索率策略或增加训练轮数")
-    else:
-        print(f"   📊 两种方法性能相当")
-    
-    # 计算收敛速度指标
-    adaptive_epochs_to_convergence = len(pinn.mre_history)
-    baseline_epochs_to_convergence = len(pinn_baseline.mre_history)
-    
-    print(f"\n🏃‍♂️ 收敛速度分析:")
-    print(f"   自适应PINN: {adaptive_epochs_to_convergence} 次评估到达 MRE={mre_adaptive:.6%}")
-    print(f"   基线PINN: {baseline_epochs_to_convergence} 次评估到达 MRE={mre_baseline:.6%}")
-    
-    if adaptive_epochs_to_convergence < baseline_epochs_to_convergence:
-        speed_improvement = (baseline_epochs_to_convergence - adaptive_epochs_to_convergence) / baseline_epochs_to_convergence
-        print(f"   🚀 自适应PINN收敛更快: 减少 {speed_improvement:.1%} 的评估次数")
-    else:
-        print(f"   📊 收敛速度相当或需要更多评估")
-
     # 输出重要事件摘要
     if important_events:
         print(f"\n📋 训练过程重要事件摘要:")
@@ -1092,18 +871,8 @@ def main():
     
     # 绘制自适应PINN的MRE历史
     if pinn.epoch_history and pinn.mre_history:
-        # 使用与前面一致的模型名称
-        if ENABLE_KRIGING and ENABLE_DATA_INJECTION:
-            adaptive_label = "完整自适应PINN"
-        elif ENABLE_KRIGING and not ENABLE_DATA_INJECTION:
-            adaptive_label = "仅克里金重采样PINN"
-        elif not ENABLE_KRIGING and ENABLE_DATA_INJECTION:
-            adaptive_label = "仅数据注入PINN"
-        else:
-            adaptive_label = "周期性重启PINN"
-            
         ax.plot(pinn.epoch_history, pinn.mre_history, 
-                label=adaptive_label, linewidth=2, alpha=0.8, color='blue')
+                label='Kriging引导的自适应PINN', linewidth=2, alpha=0.8, color='blue')
     
     # 绘制基线PINN的MRE历史
     if pinn_baseline.epoch_history and pinn_baseline.mre_history:
@@ -1156,18 +925,7 @@ def main():
     # 设置图表属性
     ax.set_xlabel('训练轮数 (Epochs)', fontsize=12)
     ax.set_ylabel('平均相对误差 (MRE)', fontsize=12)
-    
-    # 动态图表标题
-    if ENABLE_KRIGING and ENABLE_DATA_INJECTION:
-        title_suffix = "完整自适应"
-    elif ENABLE_KRIGING and not ENABLE_DATA_INJECTION:
-        title_suffix = "仅克里金重采样"
-    elif not ENABLE_KRIGING and ENABLE_DATA_INJECTION:
-        title_suffix = "仅数据注入"
-    else:
-        title_suffix = "周期性重启"
-    
-    ax.set_title(f'{title_suffix}PINN vs 基线PINN: 训练过程MRE对比', fontsize=14, fontweight='bold')
+    ax.set_title('自适应PINN vs 基线PINN: 训练过程MRE对比', fontsize=14, fontweight='bold')
     ax.legend(loc='center right', fontsize=11)  # 调整原图例位置
     ax.grid(True, alpha=0.3)
     ax.set_yscale('log')  # 使用对数坐标更好地显示误差变化
@@ -1175,31 +933,12 @@ def main():
     # 保存图表
     output_dir = Path(__file__).parent / "results"
     output_dir.mkdir(exist_ok=True)
-    
-    # 动态文件名
-    if ENABLE_KRIGING and ENABLE_DATA_INJECTION:
-        file_suffix = "full_adaptive"
-        config_desc = "完整自适应PINN (数据注入+克里金)"
-    elif ENABLE_KRIGING and not ENABLE_DATA_INJECTION:
-        file_suffix = "kriging_only"
-        config_desc = "仅克里金重采样策略"
-    elif not ENABLE_KRIGING and ENABLE_DATA_INJECTION:
-        file_suffix = "data_injection_only"
-        config_desc = "仅数据注入策略"
-    else:
-        file_suffix = "periodic_restart"
-        config_desc = "仅周期性重启策略"
-    
-    png_filename = f"mre_comparison_{file_suffix}.png"
-    pdf_filename = f"mre_comparison_{file_suffix}.pdf"
-    
-    plt.savefig(output_dir / png_filename, dpi=300, bbox_inches='tight')
-    plt.savefig(output_dir / pdf_filename, bbox_inches='tight')
+    plt.savefig(output_dir / "mre_comparison.png", dpi=300, bbox_inches='tight')
+    plt.savefig(output_dir / "mre_comparison.pdf", bbox_inches='tight')
     
     print(f"✅ 对比图已保存到: {output_dir}")
-    print(f"   - PNG格式: {output_dir / png_filename}")
-    print(f"   - PDF格式: {output_dir / pdf_filename}")
-    print(f"   - 实验配置: {config_desc}")
+    print(f"   - PNG格式: {output_dir / 'mre_comparison.png'}")
+    print(f"   - PDF格式: {output_dir / 'mre_comparison.pdf'}")
     
     # 显示图表
     plt.show()
