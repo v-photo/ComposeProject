@@ -4,6 +4,10 @@ from pathlib import Path
 import deepxde as dde
 import pandas as pd
 import os
+import time
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 
 # --- 路径设置 ---
@@ -336,7 +340,8 @@ class PINNModel:
         return pde_func
 
     def run_training_cycle(self, max_epochs: int, detect_every: int, collocation_points: np.ndarray, 
-                         detection_threshold: float = 0.1):
+                         detection_threshold: float = 0.1, reserve_data_pools: list = None, 
+                         consecutive_stagnation_count: int = 0, benchmark_callback=None):
         """
         [重构] 执行一个带有动态停止条件的训练周期。
         
@@ -345,6 +350,9 @@ class PINNModel:
             detect_every (int): 每隔多少轮进行一次性能检测。
             collocation_points (np.ndarray): 用于本周期的配置点。
             detection_threshold (float): 触发早停的相对改进阈值。
+            reserve_data_pools (list): 可选的储备数据池。
+            consecutive_stagnation_count (int): 连续停滞计数器。
+            benchmark_callback: 可选的基准回调函数。
         
         Returns:
             dict: 一个包含训练结果信息的字典，如{'stagnation_detected': bool}
@@ -394,10 +402,14 @@ class PINNModel:
         while remaining_epochs > 0:
             epochs_to_run = min(detect_every, remaining_epochs)
             
+            callbacks_to_use = [stopper]
+            if benchmark_callback:
+                callbacks_to_use.append(benchmark_callback)
+
             self.model.train(
                 iterations=epochs_to_run, 
                 display_every=5,
-                callbacks=[stopper]
+                callbacks=callbacks_to_use
             )
 
             # --- [新策略] 检查是否需要提前结束本轮自适应周期 ---
@@ -590,7 +602,7 @@ def main():
     # --- 1. 初始化 ---
     # !! 注意: DOMAIN_BOUNDS 现在仅用于可视化或采样器，实际物理边界由加载的数据决定 !!
     DOMAIN_BOUNDS = np.array([[0., 0., 0.], [1., 1., 1.]]) 
-    TOTAL_EPOCHS = 5000
+    TOTAL_EPOCHS = 2000
     ADAPTIVE_CYCLE_EPOCHS = 500  # 每多少个epoch执行一次自适应调整
     DETECT_EPOCHS = 50 # 每100轮检测一次性能
     DATA_SPLIT_RATIOS = [0.7] + [0.05]*4
@@ -655,7 +667,9 @@ def main():
             max_epochs=cycle_max_epochs,
             detect_every=DETECT_EPOCHS,
             collocation_points=current_collocation_points,
-            detection_threshold=0.1
+            detection_threshold=0.1,
+            reserve_data_pools=reserve_data_pools,
+            consecutive_stagnation_count=consecutive_stagnation_count
         )
         
         # 计算本周期实际训练了多少轮
@@ -799,5 +813,235 @@ def main():
     print(f"{'原始PINN (固定采样)':<28} | {mre_baseline:<30.6%}")
     print("-" * 65)
 
+# =================================================================================
+#  基准测试功能模块 (附加)
+# =================================================================================
+
+class BenchmarkCallback(dde.callbacks.Callback):
+    """一个在训练期间记录MRE、轮数和时间的回调。"""
+    def __init__(self, check_every=5):
+        super().__init__()
+        self.check_every = check_every
+        self.history = {'epochs': [], 'mre': [], 'time': []}
+        self.start_time = 0
+
+    def on_epoch_end(self):
+        """在每个 epoch 结束时被 DeepXDE 调用。"""
+        if self.model.train_state.step > 0 and self.model.train_state.step % self.check_every == 0:
+            current_time = time.time() - self.start_time
+            if self.model.train_state.metrics_test:
+                latest_mre = self.model.train_state.metrics_test[-1]
+                self.history['epochs'].append(self.model.train_state.step)
+                self.history['mre'].append(latest_mre)
+                self.history['time'].append(current_time)
+
+def run_adaptive_pinn_for_benchmark(config, benchmark_cb):
+    """执行自适应PINN训练并返回性能历史。"""
+    print("\n" + "="*60)
+    print("🚀 开始执行：自适应 PINN 基准测试")
+    print("="*60 + "\n")
+
+    data_loader = DummyDataLoader(
+        data_path=config["DATA_PATH"],
+        space_dims=config["SPACE_DIMS"],
+        num_samples=config["NUM_SAMPLES"]
+    )
+    main_train_set, reserve_data_pools, test_data, dose_data = data_loader.get_training_data(
+        split_ratios=config["DATA_SPLIT_RATIOS"]
+    )
+    world_min, world_max = dose_data['world_min'], dose_data['world_max']
+    pinn = PINNModel(
+        dose_data=dose_data, training_data=main_train_set, test_data=test_data,
+        num_collocation_points=config["NUM_COLLOCATION_POINTS"]
+    )
+    kriging = GPUKriging()
+    sampler = AdaptiveSampler(domain_bounds=np.vstack([world_min, world_max]))
+    current_collocation_points = (np.random.rand(config["NUM_COLLOCATION_POINTS"], 3) * (world_max - world_min) + world_min)
+    total_epochs_trained = 0
+    consecutive_stagnation_count = 0
+    
+    initial_mre = pinn.mean_relative_error_metric(None, None)
+    benchmark_cb.start_time = time.time()
+    benchmark_cb.history = {'epochs': [0], 'mre': [initial_mre], 'time': [0]}
+
+    while total_epochs_trained < config["TOTAL_EPOCHS"]:
+        remaining_total_epochs = config["TOTAL_EPOCHS"] - total_epochs_trained
+        cycle_max_epochs = min(config["ADAPTIVE_CYCLE_EPOCHS"], remaining_total_epochs)
+        
+        print(f"\n--- 主循环周期: 目标训练 {total_epochs_trained} -> {total_epochs_trained + cycle_max_epochs} ---")
+        print(f"PHASE 2a: 常规PINN训练 (本周期上限: {cycle_max_epochs} epochs)...")
+        epochs_before_cycle = pinn.model.train_state.step or 0
+        
+        cycle_result = pinn.run_training_cycle(
+            max_epochs=cycle_max_epochs,
+            detect_every=config["DETECT_EPOCHS"],
+            collocation_points=current_collocation_points,
+            detection_threshold=0.1,
+            reserve_data_pools=reserve_data_pools,
+            consecutive_stagnation_count=consecutive_stagnation_count,
+            benchmark_callback=benchmark_cb
+        )
+        
+        epochs_this_cycle = (pinn.model.train_state.step or 0) - epochs_before_cycle
+        total_epochs_trained += epochs_this_cycle
+
+        stagnation_this_cycle = cycle_result.get('stagnation_detected', False)
+        if stagnation_this_cycle:
+            consecutive_stagnation_count += 1
+            print(f"INFO: Consecutive stagnation count increased to: {consecutive_stagnation_count}")
+        else:
+            if consecutive_stagnation_count > 0:
+                print(f"INFO: Training successful, resetting stagnation count from {consecutive_stagnation_count} to 0.")
+            consecutive_stagnation_count = 0
+        
+        print(f"\nINFO: 本周期实际训练 {epochs_this_cycle} 轮. 总训练进度: {total_epochs_trained}/{config['TOTAL_EPOCHS']}")
+        
+        if total_epochs_trained >= config["TOTAL_EPOCHS"]:
+            print("\nINFO: 总训练轮数已达到目标，结束自适应训练。")
+            break
+
+        if consecutive_stagnation_count >= 2:
+            print("\n" + "!"*60)
+            print("!! 连续停滞两次，触发干预机制 !!")
+            print("!"*60)
+            if reserve_data_pools:
+                print("\nPHASE A: 注入新的储备训练数据...")
+                pinn.inject_new_data(reserve_data_pools.pop(0))
+                print("PHASE A: ✅ 新数据注入完成。")
+            else:
+                print("\nWARNING: 已无更多储备数据可注入。")
+            print("\nPHASE B: 开始克里金引导的自适应采样...")
+            scout_points = (np.random.rand(config["NUM_RESIDUAL_SCOUT_POINTS"], 3) * (world_max - world_min) + world_min)
+            true_residuals = pinn.compute_pde_residual(scout_points)
+            kriging.fit(scout_points, true_residuals)
+            num_collocation_to_generate = pinn.data.num_domain
+            current_collocation_points = sampler.generate_new_collocation_points(
+                kriging_model=kriging,
+                num_points_to_sample=num_collocation_to_generate,
+                force_exploration=True
+            )
+            print("PHASE B: ✅ 新的自适应配置点已生成。")
+            consecutive_stagnation_count = 0
+            print("-" * 60)
+        else:
+            print("\nINFO: 未达到干预阈值，下一周期将继续使用当前配置点。")
+    
+    print("🎉 自适应 PINN 训练完成!")
+    return benchmark_cb.history
+
+def run_baseline_pinn_for_benchmark(config, benchmark_cb):
+    """执行标准PINN训练并返回性能历史。"""
+    print("\n" + "="*60)
+    print("🚀 开始执行：标准 PINN 基准测试")
+    print("="*60 + "\n")
+    data_loader = DummyDataLoader(
+        data_path=config["DATA_PATH"],
+        space_dims=config["SPACE_DIMS"],
+        num_samples=config["NUM_SAMPLES"]
+    )
+    main_train_set, reserve_data_pools, test_data, dose_data = data_loader.get_training_data(
+        split_ratios=config["DATA_SPLIT_RATIOS"]
+    )
+    all_training_blocks = [main_train_set] + reserve_data_pools
+    full_training_data = np.vstack(all_training_blocks)
+    world_min, world_max = dose_data['world_min'], dose_data['world_max']
+    pinn_baseline = PINNModel(
+        dose_data=dose_data, training_data=full_training_data, test_data=test_data,
+        num_collocation_points=config["NUM_COLLOCATION_POINTS"]
+    )
+    baseline_collocation_points = (np.random.rand(config["NUM_COLLOCATION_POINTS"], 3) * (world_max - world_min) + world_min)
+    num_bc_points_base = pinn_baseline.data.bcs[0].points.shape[0]
+    if pinn_baseline.model.train_state.X_train is None: pinn_baseline.model.train(iterations=0)
+    pinn_baseline.model.train_state.X_train[num_bc_points_base : len(pinn_baseline.model.train_state.X_train) - len(pinn_baseline.data.anchors)] = baseline_collocation_points
+    initial_mre = pinn_baseline.mean_relative_error_metric(None, None)
+    benchmark_cb.start_time = time.time()
+    benchmark_cb.history = {'epochs': [0], 'mre': [initial_mre], 'time': [0]}
+    pinn_baseline.model.train(iterations=config["TOTAL_EPOCHS"], display_every=5, callbacks=[benchmark_cb])
+    print("🎉 标准 PINN 训练完成!")
+    return benchmark_cb.history
+
+def plot_histories(adaptive_hist, baseline_hist):
+    """绘制两个模型的 MRE vs. Epochs 对比图。"""
+    plt.figure(figsize=(12, 7))
+    plt.plot(adaptive_hist['epochs'], adaptive_hist['mre'], 'o-', label='Adaptive PINN', alpha=0.8)
+    plt.plot(baseline_hist['epochs'], baseline_hist['mre'], 's--', label='Baseline PINN', alpha=0.8)
+    plt.yscale('log')
+    plt.xlabel('Training Epochs')
+    plt.ylabel('Mean Relative Error (MRE) - Log Scale')
+    plt.title('Adaptive PINN vs. Baseline PINN Performance')
+    plt.legend()
+    plt.grid(True, which="both", ls="--")
+    plot_filename = "pinn_benchmark_comparison.png"
+    plt.savefig(plot_filename)
+    print(f"\n📊 对比图已保存至: {plot_filename}")
+    plt.show()
+
+def plot_mre_vs_time(adaptive_hist, baseline_hist):
+    """绘制两个模型的 MRE vs. Time 对比图。"""
+    plt.figure(figsize=(12, 7))
+    plt.plot(adaptive_hist['time'], adaptive_hist['mre'], 'o-', label='Adaptive PINN', alpha=0.8)
+    plt.plot(baseline_hist['time'], baseline_hist['mre'], 's--', label='Baseline PINN', alpha=0.8)
+    plt.yscale('log')
+    plt.xlabel('Training Time (seconds)')
+    plt.ylabel('Mean Relative Error (MRE) - Log Scale')
+    plt.title('MRE vs. Time for Adaptive and Baseline PINN')
+    plt.legend()
+    plt.grid(True, which="both", ls="--")
+    plot_filename = "pinn_benchmark_mre_vs_time.png"
+    plt.savefig(plot_filename)
+    print(f"📊 耗时对比图已保存至: {plot_filename}")
+    plt.show()
+
+def analyze_time_to_accuracy(adaptive_hist, baseline_hist, target_mre):
+    """分析达到目标精度所需的时间。"""
+    def find_time(history, target):
+        for t, m in zip(history['time'], history['mre']):
+            if m <= target:
+                return f"{t:.2f} 秒"
+        return "未达到"
+    adaptive_time = find_time(adaptive_hist, target_mre)
+    baseline_time = find_time(baseline_hist, target_mre)
+    print(f"\n--- 2. 达到 {target_mre:.0%} 相对误差所需时间 ---")
+    print(f"  - 自适应 PINN: {adaptive_time}")
+    print(f"  - 标准 PINN:   {baseline_time}")
+
+def analyze_accuracy_at_time(adaptive_hist, baseline_hist, time_limit_s):
+    """分析在固定时间内达到的精度。"""
+    def find_mre(history, time_limit):
+        final_mre = history['mre'][0]
+        for t, m in zip(history['time'], history['mre']):
+            if t > time_limit:
+                break
+            final_mre = m
+        return f"{final_mre:.4%}"
+    adaptive_mre = find_mre(adaptive_hist, time_limit_s)
+    baseline_mre = find_mre(baseline_hist, time_limit_s)
+    print(f"\n--- 3. 在 {time_limit_s} 秒内能达到的最终精度 ---")
+    print(f"  - 自适应 PINN: {adaptive_mre}")
+    print(f"  - 标准 PINN:   {baseline_mre}")
+
+def run_benchmark():
+    """主函数，编排整个基准测试流程。"""
+    BENCHMARK_CONFIG = {
+        "TOTAL_EPOCHS": 2000,
+        "ADAPTIVE_CYCLE_EPOCHS": 500,
+        "DETECT_EPOCHS": 50,
+        "DATA_SPLIT_RATIOS": [0.7] + [0.05]*4,
+        "DATA_PATH": "PINN/DATA.xlsx",
+        "SPACE_DIMS": np.array([20.0, 10.0, 10.0]),
+        "NUM_SAMPLES": 100,
+        "NUM_COLLOCATION_POINTS": 4096,
+        "NUM_RESIDUAL_SCOUT_POINTS": 5000,
+    }
+    adaptive_cb = BenchmarkCallback(check_every=5)
+    baseline_cb = BenchmarkCallback(check_every=5)
+    adaptive_history = run_adaptive_pinn_for_benchmark(BENCHMARK_CONFIG, adaptive_cb)
+    baseline_history = run_baseline_pinn_for_benchmark(BENCHMARK_CONFIG, baseline_cb)
+    plot_histories(adaptive_history, baseline_history)
+    plot_mre_vs_time(adaptive_history, baseline_history)
+    analyze_time_to_accuracy(adaptive_history, baseline_history, target_mre=0.05)
+    analyze_accuracy_at_time(adaptive_history, baseline_history, time_limit_s=120)
+
 if __name__ == "__main__":
-    main() 
+    main()
+    run_benchmark() 
