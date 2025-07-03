@@ -1,196 +1,264 @@
-import sys
-print("--- SCRIPT START ---")
-import os
+#!/usr/bin/env python3
+"""
+PINN-Kriging 耦合系统主入口脚本
+Main entry script for PINN-Kriging coupling system
+
+用法示例：
+1. 使用默认配置：python main.py
+2. 使用预设配置：python main.py --preset kriging_only
+3. 使用自定义配置文件：python main.py --config my_config.py
+4. 快速测试：python main.py --preset quick_test
+"""
+
 import argparse
+import sys
 import numpy as np
 from pathlib import Path
-# import matplotlib
-# matplotlib.use('Agg') # <--- 在导入pyplot之前设置后端
-# import matplotlib.pyplot as plt
-from typing import Dict
+import time
 
-# --- 路径设置 ---
-try:
-    current_dir = Path(__file__).parent.resolve()
-    project_root = current_dir.parent
-except NameError:
-    project_root = Path('.').resolve()
+# 添加路径
+current_dir = Path(__file__).parent
+sys.path.insert(0, str(current_dir))
 
-sys.path.insert(0, str(project_root))
-sys.path.insert(0, str(project_root / 'PINN'))
-sys.path.insert(0, str(project_root / 'ComposeProject'))
-
-# --- 模块导入 ---
-try:
-    from ComposeTools import (
-        ComposeConfig,
-        CouplingWorkflow,
-        print_compose_banner,
-        validate_compose_environment,
-        MetricsCalculator,
-    )
-    from PINN.data_processing import DataLoader
-    from PINN.dataAnalysis import get_data
-    print("✅ 模块导入成功。")
-except ImportError as e:
-    print(f"❌ 模块导入失败: {e}")
-    sys.exit(1)
-
-def print_domain_info(dose_data: Dict):
-    """
-    打印出加载的数据场的物理空间信息，以辅助手动设置参数。
-
-    Args:
-        dose_data: 从DataLoader加载的标准化剂量数据字典。
-    """
-    world_min = dose_data['world_min']
-    world_max = dose_data['world_max']
-    space_dims = dose_data['space_dims']
+def setup_environment():
+    """设置运行环境"""
+    # 解决WSL环境下的matplotlib显示问题
+    import matplotlib
+    matplotlib.use('Agg')
     
-    print("\n" + "="*25 + " 物理空间信息参考 " + "="*25)
-    print(f"  - X轴范围: [{world_min[0]:.2f}, {world_max[0]:.2f}] (总长度: {space_dims[0]:.2f} 米)")
-    print(f"  - Y轴范围: [{world_min[1]:.2f}, {world_max[1]:.2f}] (总长度: {space_dims[1]:.2f} 米)")
-    print(f"  - Z轴范围: [{world_min[2]:.2f}, {world_max[2]:.2f}] (总长度: {space_dims[2]:.2f} 米)")
-    print("=" * (50 + 4) + "\n")
+    # 设置随机种子
+    np.random.seed(42)
 
-def main(args):
-    """主执行函数"""
+def load_config(config_source=None, preset=None):
+    """加载配置"""
+    from config import Config, get_preset_config, default_config
     
-    # ==================== 1. 初始化和环境检查 ====================
-    print_compose_banner()
-    if not all(validate_compose_environment().values()):
-        print("❌ 环境检查失败，请检查依赖项。程序退出。")
-        return
+    if preset:
+        print(f"📋 使用预设配置: {preset}")
+        config = get_preset_config(preset)
+    elif config_source:
+        print(f"📋 加载自定义配置文件: {config_source}")
+        # 这里可以扩展支持从文件加载配置
+        config = default_config
+    else:
+        print("📋 使用默认配置")
+        config = default_config
+    
+    return config
 
-    config = ComposeConfig(random_seed=args.seed)
+def create_sample_data(config):
+    """创建示例数据用于测试"""
+    print("📊 创建示例数据...")
     
-    # PINN 物理参数 (应从更可靠的来源获取，此处为示例)
-    physical_params = {
-        'rho_material': 1.205,
-        'mass_energy_abs_coeff': 1.0
+    # 创建模拟的dose_data
+    space_dims = config.data.space_dims
+    dose_data = {
+        'world_min': np.array([0.0, 0.0, 0.0]),
+        'world_max': np.array(space_dims),
+        'space_dims': space_dims
     }
+    
+    # 创建模拟的训练数据
+    np.random.seed(config.system.random_seed)
+    num_samples = config.data.num_samples
+    
+    # 生成训练点
+    train_points = np.random.rand(num_samples, 3) * space_dims
+    
+    # 生成模拟的剂量值（使用简单的函数）
+    def simple_dose_function(x, y, z):
+        return np.exp(-(x**2 + y**2 + z**2) / 100) * 1000
+    
+    train_values = simple_dose_function(train_points[:, 0], 
+                                       train_points[:, 1], 
+                                       train_points[:, 2])
+    
+    # 创建测试数据
+    test_size = config.data.test_set_size
+    test_points = np.random.rand(test_size, 3) * space_dims
+    test_values = simple_dose_function(test_points[:, 0], 
+                                      test_points[:, 1], 
+                                      test_points[:, 2])
+    test_data = np.hstack([test_points, test_values.reshape(-1, 1)])
+    
+    # 创建预测点
+    pred_points = np.random.rand(1000, 3) * space_dims
+    
+    print(f"   ✅ 训练数据: {len(train_points)} 点")
+    print(f"   ✅ 测试数据: {len(test_data)} 点") 
+    print(f"   ✅ 预测点: {len(pred_points)} 点")
+    
+    return train_points, train_values, test_data, pred_points, dose_data
 
-    # ==================== 2. 数据加载和准备 ====================
-    print(f"\n" + "="*25 + " 步骤1: 数据加载 " + "="*25)
-    if not os.path.exists(args.data_path):
-        print(f"❌ 数据文件不存在: {args.data_path}")
+def run_coupling_workflow(config, train_points, train_values, test_data, pred_points, dose_data, method='auto'):
+    """运行耦合工作流"""
+    print("\n🚀 开始运行耦合工作流...")
+    
+    from ComposeTools import CouplingWorkflow
+    
+    # 创建工作流
+    workflow = CouplingWorkflow(physical_params=config.pinn.physical_params)
+    
+    # 运行自动选择pipeline
+    start_time = time.time()
+    
+    if method == 'auto':
+        # 智能选择模式
+        print("🤖 使用智能选择模式：自动选择最适合的预测方法")
+        results = workflow.run_auto_selection_pipeline(
+            train_points=train_points,
+            train_values=train_values,
+            prediction_points=pred_points,
+            dose_data=dose_data,
+            test_data=test_data,
+            training_epochs=config.pinn.total_epochs // 4,
+            num_collocation_points=config.pinn.num_collocation_points
+        )
+    elif method == 'kriging':
+        # 强制使用Kriging
+        print("⚙️ 强制使用Kriging方法")
+        from ComposeTools import KrigingAdapter
+        kriging_adapter = KrigingAdapter()
+        kriging_adapter.fit(train_points, train_values)
+        predictions = kriging_adapter.predict(pred_points)
+        results = {
+            'method_used': 'kriging',
+            'final_predictions': predictions,
+            'total_time': 0
+        }
+    elif method == 'pinn':
+        # 强制使用PINN
+        print("🧠 强制使用PINN方法")
+        from ComposeTools import AdvancedPINNAdapter
+        pinn_adapter = AdvancedPINNAdapter(config.pinn.physical_params)
+        pinn_adapter.fit_from_memory(
+            train_points=train_points,
+            train_values=train_values,
+            dose_data=dose_data,
+            test_data=test_data,
+            num_collocation_points=config.pinn.num_collocation_points
+        )
+        pinn_adapter.train_cycle(max_epochs=config.pinn.total_epochs // 4)
+        predictions = pinn_adapter.predict(pred_points)
+        results = {
+            'method_used': 'pinn',
+            'final_predictions': predictions,
+            'pinn_adapter': pinn_adapter,
+            'total_time': 0
+        }
+    else:
+        raise ValueError(f"未知的方法: {method}。支持的方法: 'auto', 'kriging', 'pinn'")
+    
+    end_time = time.time()
+    results['total_time'] = end_time - start_time
+    
+    print(f"\n✅ 工作流完成！")
+    print(f"   - 使用方法: {results['method_used']}")
+    print(f"   - 预测点数: {len(results['final_predictions'])}")
+    print(f"   - 总耗时: {results['total_time']:.2f} 秒")
+    
+    return results
+
+def analyze_results(results, test_data):
+    """分析结果"""
+    print("\n📊 结果分析...")
+    
+    predictions = results['final_predictions']
+    method_used = results['method_used']
+    
+    # 如果有测试数据，计算误差指标
+    if test_data is not None and len(test_data) > 0:
+        # 这里需要确保预测点和测试点对应
+        # 为了简化，我们只计算一些基本统计
+        print(f"   - 预测值范围: [{np.min(predictions):.2e}, {np.max(predictions):.2e}]")
+        print(f"   - 预测值均值: {np.mean(predictions):.2e}")
+        print(f"   - 预测值标准差: {np.std(predictions):.2e}")
+        
+        if method_used == 'kriging':
+            print("   - 使用了Kriging方法，适合均匀分布的数据")
+        else:
+            print("   - 使用了高级PINN方法，适合复杂分布的数据")
+            
+            # 如果有PINN适配器，显示训练历史
+            if 'pinn_adapter' in results:
+                adapter = results['pinn_adapter']
+                if hasattr(adapter, 'mre_history') and len(adapter.mre_history) > 0:
+                    final_mre = adapter.mre_history[-1]
+                    print(f"   - 最终MRE: {final_mre:.6f}")
+                    print(f"   - 训练历史长度: {len(adapter.mre_history)}")
+
+def save_results(results, config):
+    """保存结果"""
+    if not config.system.save_results:
         return
         
-    raw_data = get_data(args.data_path)
-    dose_data = DataLoader.load_dose_from_dict(
-        data_dict=raw_data,
-        space_dims=np.array([20.0, 10.0, 10.0]) # 示例维度
-    )
+    print("\n💾 保存结果...")
     
-    # 打印物理空间信息以供参考
-    print_domain_info(dose_data)
+    results_dir = Path(config.system.results_dir)
+    results_dir.mkdir(exist_ok=True)
     
-    # 采样训练点 (用于两个方案的初始训练)
-    print(f"采样 {args.num_samples} 个训练点...")
-    train_points, train_values, _ = DataLoader.sample_training_points(
-        dose_data, 
-        num_samples=args.num_samples,
-        sampling_strategy='positive_only', # 使用 'positive_only' 策略
-    )
-    print(f"✅ 成功采样 {len(train_points)} 个训练点。")
-
-    # 准备全场预测点
-    original_grid_shape = np.array(dose_data['dose_grid'].shape)
-    if args.downsample > 1:
-        print(f"⚠️ 警告: 预测网格将通过系数 {args.downsample} 进行降采样以加速调试。")
-        step = int(args.downsample)
-        pred_x_indices = np.arange(0, original_grid_shape[0], step)
-        pred_y_indices = np.arange(0, original_grid_shape[1], step)
-        pred_z_indices = np.arange(0, original_grid_shape[2], step)
-        grid_shape = (len(pred_x_indices), len(pred_y_indices), len(pred_z_indices))
-    else:
-        pred_x_indices = np.arange(original_grid_shape[0])
-        pred_y_indices = np.arange(original_grid_shape[1])
-        pred_z_indices = np.arange(original_grid_shape[2])
-        grid_shape = original_grid_shape
-
-    pred_x = dose_data['world_min'][0] + (pred_x_indices + 0.5) * dose_data['voxel_size'][0]
-    pred_y = dose_data['world_min'][1] + (pred_y_indices + 0.5) * dose_data['voxel_size'][1]
-    pred_z = dose_data['world_min'][2] + (pred_z_indices + 0.5) * dose_data['voxel_size'][2]
-    XX, YY, ZZ = np.meshgrid(pred_x, pred_y, pred_z, indexing='ij')
-    prediction_points = np.vstack([XX.ravel(), YY.ravel(), ZZ.ravel()]).T
-
-    # ==================== 3. 初始化并执行工作流 ====================
-    print(f"\n" + "="*25 + f" 步骤2: 执行自动选择工作流 " + "="*25)
+    # 保存预测结果
+    predictions_file = results_dir / f"predictions_{config.experiment.experiment_name}.npy"
+    np.save(predictions_file, results['final_predictions'])
+    print(f"   ✅ 预测结果已保存: {predictions_file}")
     
-    workflow = CouplingWorkflow(physical_params=physical_params, config=config)
-    
-    pinn_params = {
-        'epochs': args.pinn_epochs,
-        'use_lbfgs': args.use_lbfgs,
-        'loss_weights': [1, 100]
-    }
+    # 如果有PINN适配器，保存训练历史
+    if 'pinn_adapter' in results:
+        adapter = results['pinn_adapter']
+        if hasattr(adapter, 'mre_history'):
+            history_file = results_dir / f"training_history_{config.experiment.experiment_name}.npz"
+            np.savez(history_file, 
+                    mre_history=adapter.mre_history,
+                    epoch_history=adapter.epoch_history,
+                    training_events=adapter.training_events)
+            print(f"   ✅ 训练历史已保存: {history_file}")
 
-    results = workflow.run_auto_selection_pipeline(
-        train_points=train_points,
-        train_values=train_values,
-        prediction_points=prediction_points,
-        dose_data=dose_data,
-        **pinn_params
-    )
-        
-    print(f"✅ 工作流执行完毕。")
-    
-    # ==================== 4. 评估和可视化 ====================
-    print(f"\n" + "="*25 + " 步骤3: 结果评估 " + "="*25)
-    
-    # 准备用于评估的真值
-    if args.downsample > 1:
-        true_field_for_eval = dose_data['dose_grid'][np.ix_(pred_x_indices, pred_y_indices, pred_z_indices)]
-        test_values = true_field_for_eval.flatten()
-    else:
-        test_values = dose_data['dose_grid'].flatten()
-
-    # ==================== 结果性能评估 ====================
-    print("\n" + "#"*20 + " 最终结果性能评估 " + "#"*20)
-    
-    final_predictions = results.get('final_predictions')
-    method_used = results.get('method_used', '未知')
-
-    if final_predictions is not None:
-        print(f"评估点数: {len(test_values)}")
-        print(f"本次运行使用的方法: {method_used.upper()}")
-
-        # 计算最终结果的性能
-        final_metrics = MetricsCalculator.compute_metrics(test_values, final_predictions)
-        
-        print(f"\n--- 最终性能 ({method_used.upper()}) ---")
-        for name, value in final_metrics.items():
-            print(f"  - {name}: {value:.6f}")
-    else:
-        print("⚠️ 未能获取最终预测结果，无法进行性能评估。")
-
-    print("#"*20 + " 性能评估结束 " + "#"*20 + "\n")
-    # =======================================================================
-        
-    print("\n🎉 所有流程执行完毕。")
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="运行 Kriging-PINN 自动选择工作流")
-    parser.add_argument('--data_path', type=str, default="PINN/DATA.xlsx",
-                        help="输入数据文件的路径 (Excel格式)")
-    parser.add_argument('--num_samples', type=int, default=300,
-                        help="用于初始训练的采样点数量")
-    parser.add_argument('--pinn_epochs', type=int, default=5000,
-                        help="PINN训练的周期数 (仅在选择PINN时生效)")
-    parser.add_argument('--downsample', type=int, default=1,
-                        help="全场预测网格的降采样系数(>1)，用于加速调试。")
-    parser.add_argument('--seed', type=int, default=42,
-                        help="随机种子，以确保结果可复现")
-    parser.add_argument('--use_lbfgs', action='store_true',
-                        help="在PINN训练中使用L-BFGS进行精细调优 (仅在选择PINN时生效)")
+def main():
+    """主函数"""
+    parser = argparse.ArgumentParser(description="PINN-Kriging耦合系统")
+    parser.add_argument('--preset', type=str, 
+                       choices=['full_adaptive', 'kriging_only', 'data_injection_only', 'baseline', 'quick_test'],
+                       help='使用预设配置')
+    parser.add_argument('--config', type=str, help='自定义配置文件路径')
+    parser.add_argument('--method', type=str, choices=['auto', 'kriging', 'pinn'], 
+                       default='auto', help='预测方法选择: auto(智能选择), kriging(强制克里金), pinn(强制PINN)')
+    parser.add_argument('--verbose', action='store_true', help='详细输出')
     
     args = parser.parse_args()
     
+    # 设置环境
+    setup_environment()
+    
+    # 加载配置
+    config = load_config(config_source=args.config, preset=args.preset)
+    
+    if args.verbose:
+        config.system.verbose = True
+    
+    # 显示配置摘要
+    print(config.summary())
+    
     try:
-        main(args)
+        # 创建示例数据
+        train_points, train_values, test_data, pred_points, dose_data = create_sample_data(config)
+        
+        # 运行耦合工作流
+        results = run_coupling_workflow(config, train_points, train_values, test_data, pred_points, dose_data, method=args.method)
+        
+        # 分析结果
+        analyze_results(results, test_data)
+        
+        # 保存结果
+        save_results(results, config)
+        
+        print("\n🎉 运行完成！")
+        
     except Exception as e:
-        print(f"\n❌ 程序执行时发生严重错误: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"\n❌ 运行出错: {e}")
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

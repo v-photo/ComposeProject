@@ -23,7 +23,7 @@ import pickle
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import NearestNeighbors
 # ==================== 耦合项目原有工具和模块导入 ====================
-# PINNTrainer 将在后面的模块导入中处理
+from PINN.pinn_core import  PINNTrainer
 
 # 尝试导入所需的第三方库
 try:
@@ -60,36 +60,16 @@ except ImportError as e:
 # 添加PINN模块路径
 sys.path.insert(0, str(project_root / "PINN"))
 try:
-    from pinn_core import SimulationConfig, PINNTrainer, ResultAnalyzer
-    from data_processing import DataLoader
-    from visualization import Visualizer
-    from tools import setup_deepxde_backend
-    from dataAnalysis import get_data
+    from PINN.pinn_core import SimulationConfig, PINNTrainer, ResultAnalyzer
+    from PINN.data_processing import DataLoader
+    from PINN.visualization import Visualizer # <--- 修改这里
+    from PINN.tools import setup_deepxde_backend
+    from PINN.dataAnalysis import get_data
     PINN_AVAILABLE = True
     print("✅ PINN模块导入成功")
 except ImportError as e:
-    try:
-        # 尝试相对导入
-        sys.path.insert(0, str(project_root))
-        from PINN.pinn_core import SimulationConfig, PINNTrainer, ResultAnalyzer
-        from PINN.data_processing import DataLoader
-        from PINN.visualization import Visualizer
-        from PINN.tools import setup_deepxde_backend
-        from PINN.dataAnalysis import get_data
-        PINN_AVAILABLE = True
-        print("✅ PINN模块导入成功（相对路径）")
-    except ImportError as e2:
-        PINN_AVAILABLE = False
-        warnings.warn(f"PINN模块导入失败: {e2}")
-
-# 尝试导入adaptive_pinn_trainer中的PINNModel
-try:
-    from adaptive_pinn_trainer import PINNModel
-    ADAPTIVE_PINN_AVAILABLE = True
-    print("✅ adaptive_pinn_trainer.PINNModel导入成功")
-except ImportError as e:
-    ADAPTIVE_PINN_AVAILABLE = False
-    warnings.warn(f"adaptive_pinn_trainer.PINNModel导入失败: {e}")
+    PINN_AVAILABLE = False
+    warnings.warn(f"PINN模块导入失败: {e}")
 
 # ==================== 全局常量与配置 ====================
 # Global Constants and Configuration
@@ -358,8 +338,8 @@ class PINNAdapter:
                         sample_weights: Optional[np.ndarray] = None,
                         **kwargs) -> 'PINNAdapter':
         """
-        使用内存中的训练数据点训练PINN模型
-        使用您的完整PINN优化算法
+        使用内存中的训练数据点训练PINN模型。
+        会自动处理对数转换。此方法专为耦合工作流设计。
         
         Args:
             train_points: 训练点坐标 (N, 3)
@@ -371,11 +351,8 @@ class PINNAdapter:
         Returns:
             self
         """
-        print("INFO: 开始执行 PINNAdapter.fit_from_memory() - 使用完整PINN算法")
+        print("INFO: 开始执行 PINNAdapter.fit_from_memory()")
         
-        if not PINN_AVAILABLE:
-            raise RuntimeError("PINN模块不可用")
-            
         # 步骤 1: 数据准备 (转换物理值为对数值)
         print(f"      - 步骤1: 转换 {len(train_values)} 个训练点的物理值为对数值...")
         sampled_log_doses = np.log(np.maximum(train_values, EPSILON))
@@ -423,221 +400,22 @@ class PINNAdapter:
             loss_weights=loss_weights
         )
         
-        self.dose_data = dose_data
         self.is_fitted = True
         print("INFO: PINNAdapter.fit_from_memory() 完成")
         return self
 
     def predict(self, prediction_points: np.ndarray) -> np.ndarray:
         """
-        使用训练好的PINN模型进行预测
-        根据约定，此方法直接返回最终的物理剂量值(线性尺度)
+        使用训练好的PINN模型进行预测。
+        根据约定，此方法直接返回最终的物理剂量值(线性尺度)。
         """
         if not self.is_fitted:
-            raise RuntimeError("PINN模型尚未训练，请先调用fit_from_memory()")
+            raise RuntimeError("PINN模型尚未训练，请先调用fit()")
             
         # 根据约定，trainer.predict()返回的就是最终的物理剂量
         predicted_doses = self.trainer.predict(prediction_points)
         
         return predicted_doses.flatten()
-
-class AdvancedPINNAdapter:
-    """
-    高级PINN适配器，直接使用adaptive_pinn_trainer.py中验证过的PINNModel类
-    Advanced PINN adapter that directly uses the validated PINNModel class from adaptive_pinn_trainer.py
-    """
-    
-    def __init__(self, physical_params: Dict, config: ComposeConfig = None):
-        """
-        初始化高级PINN适配器
-        
-        Args:
-            physical_params: 物理参数字典
-            config: 全局配置对象
-        """
-        self.config = config or ComposeConfig()
-        self.physical_params = physical_params
-        self.pinn_model = None
-        self.dose_data = None
-        self.is_fitted = False
-        
-        # 添加传统trainer作为备选方案
-        if PINN_AVAILABLE:
-            self.trainer = PINNTrainer(physical_params=physical_params)
-        else:
-            self.trainer = None
-        
-        print("INFO: (AdvancedPINNAdapter) 高级PINN适配器已初始化")
-        
-    def fit_from_memory(self, 
-                       train_points: np.ndarray,
-                       train_values: np.ndarray,
-                       dose_data: Dict,
-                       test_data: np.ndarray = None,
-                       network_config: Dict = None,
-                       loss_ratio: float = 10.0,
-                       num_collocation_points: int = 4096,
-                       **kwargs) -> 'AdvancedPINNAdapter':
-        """
-        使用内存中的数据初始化并准备PINN模型
-        直接使用adaptive_pinn_trainer.py中的PINNModel类
-        
-        Args:
-            train_points: 训练点坐标 (N, 3)
-            train_values: 训练点数值 (N,)
-            dose_data: 剂量数据字典
-            test_data: 测试数据 (M, 4) [x,y,z,value]
-            network_config: 网络配置字典
-            loss_ratio: 初始损失权重比值
-            num_collocation_points: 配置点数量
-            **kwargs: 其他参数
-            
-        Returns:
-            self
-        """
-        print("INFO: (AdvancedPINNAdapter) 开始使用adaptive_pinn_trainer.PINNModel初始化...")
-        
-        if not ADAPTIVE_PINN_AVAILABLE:
-            print("⚠️  adaptive_pinn_trainer.PINNModel不可用，回退到标准PINNAdapter...")
-            # 使用标准的PINNAdapter作为回退方案
-            try:
-                standard_pinn = PINNAdapter(self.physical_params, self.config)
-                training_epochs = kwargs.get('training_epochs', 5000)
-                standard_pinn.fit_from_memory(
-                    train_points=train_points,
-                    train_values=train_values,
-                    dose_data=dose_data,
-                    epochs=training_epochs,
-                    **kwargs
-                )
-                # 将标准PINN的接口复制到当前对象
-                self.trainer = standard_pinn.trainer
-                self.dose_data = standard_pinn.dose_data
-                self.is_fitted = standard_pinn.is_fitted
-                print("   ✅ 标准PINN训练成功")
-                return self
-            except Exception as e2:
-                print(f"   ⚠️  标准PINN也失败: {e2}")
-                raise RuntimeError("无法初始化任何PINN模型")
-        
-        # 存储数据
-        self.dose_data = dose_data
-        
-        # 设置网络配置
-        if network_config is None:
-            network_config = {'layers': [3, 64, 64, 64, 1], 'activation': 'tanh'}
-        
-        # 准备训练数据格式：[x, y, z, value]
-        training_data = np.hstack([train_points, train_values.reshape(-1, 1)])
-        
-        # 准备测试数据格式：[x, y, z, value]
-        if test_data is None:
-            # 如果没有提供测试数据，使用训练数据的一部分作为测试数据
-            from sklearn.model_selection import train_test_split
-            _, test_subset = train_test_split(training_data, test_size=0.2, random_state=42)
-            test_data = test_subset
-        
-        # 直接使用adaptive_pinn_trainer.py中的PINNModel类
-        self.pinn_model = PINNModel(
-            dose_data=dose_data,
-            training_data=training_data,
-            test_data=test_data,
-            num_collocation_points=num_collocation_points,
-            network_layers=network_config['layers'],
-            lr=kwargs.get('learning_rate', 1e-3),
-            loss_ratio=loss_ratio
-        )
-        
-        self.is_fitted = True
-        print(f"INFO: (AdvancedPINNAdapter) ✅ 使用adaptive_pinn_trainer.PINNModel初始化完成")
-        return self
-    
-    def train_cycle(self, max_epochs: int, detect_every: int = 500, 
-                   detection_threshold: float = 0.1, 
-                   collocation_points: np.ndarray = None) -> Dict[str, Any]:
-        """
-        执行一个训练周期，直接调用PINNModel的run_training_cycle方法
-        
-        Args:
-            max_epochs: 最大训练轮数
-            detect_every: 检测间隔
-            detection_threshold: 早停阈值
-            collocation_points: 配置点
-            
-        Returns:
-            训练结果字典
-        """
-        print(f"INFO: (AdvancedPINNAdapter) 开始训练周期 (最大{max_epochs}轮)...")
-        
-        if self.pinn_model is None:
-            raise RuntimeError("PINNModel未初始化，请先调用fit_from_memory()")
-        
-        # 生成适当数量的配置点，确保与PINNModel中的配置数量匹配
-        if collocation_points is None:
-            world_min = self.dose_data['world_min']
-            world_max = self.dose_data['world_max']
-            
-            # 从PINNModel获取实际需要的配置点数量
-            # 计算公式：总训练点数 - 边界条件点数 - 锚点数
-            if self.pinn_model.model.train_state.X_train is not None:
-                total_train_points = len(self.pinn_model.model.train_state.X_train)
-                num_bc_points = self.pinn_model.data.bcs[0].points.shape[0]
-                num_anchors = len(self.pinn_model.data.anchors)
-                required_collocation_points = total_train_points - num_bc_points - num_anchors
-                print(f"   - 检测到需要 {required_collocation_points} 个配置点")
-            else:
-                # 如果训练状态未初始化，使用PINNModel中定义的数量
-                required_collocation_points = self.pinn_model.data.num_domain
-                print(f"   - 使用默认配置点数量: {required_collocation_points}")
-            
-            # 生成对应数量的配置点
-            collocation_points = np.random.uniform(world_min, world_max, (required_collocation_points, 3))
-        
-        # 直接调用PINNModel的run_training_cycle方法
-        result = self.pinn_model.run_training_cycle(
-            max_epochs=max_epochs,
-            detect_every=detect_every,
-            collocation_points=collocation_points,
-            detection_threshold=detection_threshold
-        )
-        
-        return result
-    
-    def predict(self, points: np.ndarray) -> np.ndarray:
-        """预测，直接调用PINNModel的predict方法"""
-        if not self.is_fitted:
-            raise RuntimeError("模型尚未训练")
-        
-        if self.pinn_model is not None:
-            return self.pinn_model.predict(points)
-        elif self.trainer is not None:
-            # 回退到标准trainer
-            return self.trainer.predict(points)
-        else:
-            raise RuntimeError("无可用的预测模型")
-    
-    def update_loss_ratio(self, new_loss_ratio: float):
-        """动态更新损失权重比值，直接调用PINNModel的update_loss_ratio方法"""
-        if self.pinn_model is not None:
-            self.pinn_model.update_loss_ratio(new_loss_ratio)
-        else:
-            print("⚠️  PINNModel不可用，无法更新损失权重比值")
-    
-    def inject_new_data(self, new_data_array: np.ndarray):
-        """注入新的训练数据，直接调用PINNModel的inject_new_data方法"""
-        if self.pinn_model is not None:
-            self.pinn_model.inject_new_data(new_data_array)
-        else:
-            print("⚠️  PINNModel不可用，无法注入新数据")
-    
-    def compute_pde_residual(self, points: np.ndarray) -> np.ndarray:
-        """计算PDE残差，直接调用PINNModel的compute_pde_residual方法"""
-        if self.pinn_model is not None:
-            return self.pinn_model.compute_pde_residual(points)
-        else:
-            print("⚠️  PINNModel不可用，无法计算PDE残差")
-            return np.zeros(len(points))
-
 
 def validate_compose_environment() -> Dict[str, bool]:
     """
@@ -668,36 +446,19 @@ class CouplingWorkflow:
     耦合工作流主编排器
     Main orchestrator for coupling workflows
     """
-    def __init__(self, physical_params: Dict = None, config: ComposeConfig = None):
+    def __init__(self, physical_params: Dict, config: ComposeConfig = None):
         """
         初始化工作流
         
         Args:
-            physical_params: 物理参数字典 (如rho, mu)，如果为None则从config中获取
+            physical_params: 物理参数字典 (如rho, mu)
             config: 全局配置对象
         """
+        self.physical_params = physical_params
         self.config = config or ComposeConfig()
-        
-        # 从配置中获取物理参数（如果未提供）
-        if physical_params is None:
-            # 尝试从新配置系统获取
-            try:
-                from .config import default_config
-                self.physical_params = default_config.pinn.physical_params
-            except ImportError:
-                # 回退到默认值
-                self.physical_params = {
-                    'rho_material': 1.2,
-                    'mass_energy_abs_coeff': 1.0,
-                    'rho': 1.2, 
-                    'mu': 1e-3
-                }
-        else:
-            self.physical_params = physical_params
         
         if self.config.verbose:
             print("="*20 + " 耦合工作流初始化 " + "="*20)
-            print(f"  - 物理参数: {self.physical_params}")
             print(f"  - 使用配置: {self.config}")
             print("="*20 + " 初始化完成 " + "="*20 + "\n")
 
@@ -825,74 +586,25 @@ class CouplingWorkflow:
             print(f"   - 已生成 {len(kriging_predictions)} 个Kriging预测。")
 
         elif method_to_use == 'pinn':
-            # --- 执行高级 PINN 工作流 ---
-            print("\n" + "-"*20 + " 执行高级PINN全局预测 " + "-"*20)
+            # --- 执行 PINN 工作流 ---
+            print("\n" + "-"*20 + " 执行 PINN 全局预测 " + "-"*20)
             
-            # 步骤 2: 训练高级PINN模型
-            print("\n--- 步骤 2/3: 使用全部稀疏数据训练高级PINN模型 ---")
-            
-            # 使用新的AdvancedPINNAdapter
-            advanced_pinn = AdvancedPINNAdapter(self.physical_params, self.config)
-            
-            # 准备测试数据（如果有的话）
-            test_data = kwargs.get('test_data', None)
-            
-            # 从kwargs中移除test_data以避免重复传递
-            kwargs_copy = kwargs.copy()
-            kwargs_copy.pop('test_data', None)
-            
-            try:
-                # 尝试使用高级PINN适配器
-                advanced_pinn.fit_from_memory(
-                    train_points=train_points,
-                    train_values=train_values,
-                    dose_data=dose_data,
-                    test_data=test_data,
-                    **kwargs_copy
-                )
-                
-                # 执行训练
-                training_epochs = kwargs.get('training_epochs', 5000)
-                advanced_pinn.train_cycle(max_epochs=training_epochs)
-                
-            except Exception as e:
-                print(f"⚠️  高级PINN训练失败: {e}")
-                print("   回退到标准PINNAdapter（使用您的PINN优化算法）...")
-                
-                # 使用标准的PINNAdapter作为回退方案
-                try:
-                    standard_pinn = PINNAdapter(self.physical_params, self.config)
-                    standard_pinn.fit_from_memory(
-                        train_points=train_points,
-                        train_values=train_values,
-                        dose_data=dose_data,
-                        epochs=training_epochs,
-                        **kwargs_copy
-                    )
-                    advanced_pinn = standard_pinn
-                    print("   ✅ 标准PINN训练成功")
-                except Exception as e2:
-                    print(f"   ⚠️  标准PINN也失败: {e2}")
-                    print("   最终回退到简单预测器（仅用于演示）...")
-                    print("   ⚠️  注意：这不是您的PINN优化算法，仅用于保持系统运行")
-                    
-                    # 创建一个简单的预测器类
-                    class SimplePredictorForDemo:
-                        def predict(self, points):
-                            # 返回基于位置的简单函数值
-                            x, y, z = points[:, 0], points[:, 1], points[:, 2]
-                            return np.exp(-(x**2 + y**2 + z**2) / 1000) * 1000 + np.random.rand(len(points)) * 100
-                    
-                    advanced_pinn = SimplePredictorForDemo()
-            
-            print("   ✅ 高级PINN模型训练完成。")
+            # 步骤 2: 训练PINN模型
+            print("\n--- 步骤 2/3: 使用全部稀疏数据训练PINN模型 ---")
+            pinn_adapter = PINNAdapter(self.physical_params, self.config)
+            pinn_adapter.fit_from_memory(
+                train_points=train_points, 
+                train_values=train_values, 
+                dose_data=dose_data, 
+                **kwargs
+            )
+            print("   ✅ PINN模型训练完成。")
 
             # 步骤 3: 获取PINN的预测结果
-            print("\n--- 步骤 3/3: 获取高级PINN在全场的独立预测 ---")
-            pinn_predictions = advanced_pinn.predict(prediction_points)
+            print("\n--- 步骤 3/3: 获取PINN在全场的独立预测 ---")
+            pinn_predictions = pinn_adapter.predict(prediction_points)
             results['final_predictions'] = pinn_predictions
-            results['pinn_adapter'] = advanced_pinn  # 返回适配器实例供后续分析
-            print(f"   - 已生成 {len(pinn_predictions)} 个高级PINN预测。")
+            print(f"   - 已生成 {len(pinn_predictions)} 个PINN预测。")
 
         end_time = time.time()
         results['total_time'] = end_time - start_time
