@@ -1,0 +1,976 @@
+
+\documentclass[a4paper, twocolumns, fleqn]{cas-dc}
+
+\usepackage[authoryear]{natbib}
+\usepackage{hyperref} 
+\hypersetup{
+colorlinks=true, 
+linkcolor=blue, 
+citecolor=blue, 
+urlcolor=blue 
+}
+\usepackage{setspace} 
+\usepackage{tikz} 
+\usepackage{xcolor} %修改稿修改部分标记
+\usepackage{lineno} %行号
+\usepackage{tikz-3dplot} 
+\usepackage{preview} 
+\usepackage{graphicx, subcaption} 
+\usepackage{wrapfig} 
+\usepackage{float} 
+\usepackage{amsmath, amsthm, amssymb, amsfonts} 
+\usepackage{booktabs}  
+\usepackage{array}     
+\usepackage{algorithm} 
+\usepackage{algorithmic} 
+\usepackage{caption}
+% \usepackage{multicol}
+\usepackage{flushend}
+\usepackage{balance}
+\usepackage{pbalance}
+% \usepackage{afterpage}
+\usepackage{soul} %添加删除线下划线等标记
+
+\captionsetup[figure]{labelfont={bf}, labelformat={default}, labelsep=period, name={\rmfamily Fig}}
+
+
+
+\usetikzlibrary{shapes, arrows, positioning, 3d}
+\pgfdeclarelayer{background}
+\pgfdeclarelayer{foreground1}
+\pgfdeclarelayer{foreground2}
+\pgfsetlayers{background, main, foreground1, foreground2}
+\captionsetup{hypcap=false}
+
+\def\tsc#1{\csdef{#1}{\textsc{\lowercase{#1}}\xspace}}
+
+% \setlength\linenumbersep{20pt} % 行号离正文的距离
+% \renewcommand\linenumberfont{\normalfont\small\color{gray}} % 行号字体设置
+
+\begin{document}
+% \pagewiselinenumbers% 按页重新编号 
+% \switchlinenumbers	% 双栏
+% \linenumbers  % 激活行号
+
+\let\WriteBookmarks\relax
+\def\floatpagepagefraction{1}
+\def\textpagefraction{.001}
+\let\printorcid\relax
+
+\shorttitle{\rmfamily Application of Data Partitioned Kriging Algorithm with GPU Acceleration in Real-time and Refined Reconstruction of Three-dimensional Radiation Fields}    
+
+\shortauthors{Ningbiao Xiao, Jingsen Guo, Zhijia Kuang, Wei Wang}  
+
+\title [mode = title]{Application of Data Partitioned Kriging Algorithm with GPU Acceleration in Real-time and Refined Reconstruction of Three-dimensional Radiation Fields}  
+
+
+\author[1]{Ningbiao Xiao}
+\cormark[1]
+\fnmark[1]
+\ead{yuweizhiwang@gmail.com}
+\credit{Conceptualization, Methodology, Software, Validation, Formal analysis, Investigation, Visualization, Writing}
+
+            
+\author[1]{Jingsen Guo}
+\fnmark[2]
+\credit{Writing – review}
+
+\author[1]{Zhijia Kuang}
+\fnmark[3]
+\credit{Software}
+
+
+\author[1]{Wei Wang}
+\fnmark[4]
+\credit{Writing – review}
+
+\affiliation[1]{organization={China Institute of Atomic Energy}, 
+            city={Beijing}, 
+            postcode={102400}, 
+            country={China}}
+
+\cortext[1]{Corresponding author}
+
+\begin{abstract}
+Accurately assessing personal radiation doses in real radiation environments like nuclear power plants requires precise and real-time reconstruction of three-dimensional radiation fields. The Kriging algorithm, known for its accuracy in spatial interpolation, provides a promising approach for this task. However, its computational demands can be significant, especially in real-time scenarios. To address this, we enhance the Kriging algorithm with GPU acceleration and data partitioning strategies, enabling efficient and accurate reconstruction of three-dimensional nuclear radiation fields. Using Fluka software for Monte Carlo simulations, we generated a virtual radiation field of dimensions $5m \times 5m \times 5m$ for a single-source, unshielded scenario, and a field of dimensions $20m \times 6m \times 8m$ for a multi-source, shielded scenario. Using the simulated data, we compared the prediction accuracy of the improved algorithm with the conventional Kriging algorithm and further explored factors influencing the acceleration ratio of the improved algorithm. The results indicate that the GPU-accelerated and data-partitioned Kriging algorithm achieves nearly identical accuracy compared to the traditional method. In the single-source, unshielded scenario, with more than 343 known (measurement) points and predicting $95 \times 95 \times 95 = 857375$ points, the prediction accuracy remains above 92.25\%. In the multi-source, shielded scenario, with more than 8000 known (measurement) points and predicting $95 \times 95 \times 95 = 857375$ points, the prediction accuracy remains above 91.17\%. The acceleration performance of the improved algorithm is consistent across both scenarios, with the acceleration ratio increasing as the number of known and predicted points grows, reaching approximately 20 for smaller datasets and up to 93 for larger datasets. Additionally, the acceleration effect of the improved algorithm varies with data partition size, initially increasing and then decreasing as the partition size increases. When the number of known points is 512 and the number of predicted points is 884736, the optimal partition size lies between 80000 and 90000, resulting in a prediction time of only 0.24 seconds.
+    
+\end{abstract}
+
+
+\begin{keywords}
+ Kriging \sep GPU Acceleration \sep Data Partitioning \sep 3D Radiation Field Reconstruction
+\end{keywords}
+
+\maketitle
+
+\section{introduction}\label{section1}
+In recent years, with the continuous development of nuclear science and engineering technology, accurately assessing and efficiently monitoring the radiation distribution in complex environments has become a critical issue. Traditional radiation monitoring methods primarily rely on deploying a limited number of point detectors. While these can obtain radiation readings at specific locations, they fail to adequately represent the distribution of the radiation field in the entire three-dimensional space. This presents numerous challenges for radiation protection, facility design optimization, and incident assessment.
+
+The development of three-dimensional radiation field reconstruction technology can effectively address these challenges. This technology mainly includes two aspects: forward modeling and inverse reconstruction. Forward modeling refers to simulating the theoretical radiation field distribution based on known source conditions and transmission medium parameters. In contrast, inverse reconstruction utilizes the radiation data obtained from monitoring to reconstruct the actual three-dimensional radiation field distribution through algorithms. Forward modeling methods (\cite{Monte}) include Monte Carlo simulation, point kernel integration method, etc. These methods provide higher accuracy but necessitate precise information on sources and shielding. In practical engineering, for the real-time three-dimensional reconstruction of real radiation fields such as nuclear power plant buildings, there may be radioactive anomalies or leakage incidents. At such times, due to the potential presence of unknown sources, forward modeling methods relying on source information cannot accurately reflect the real-time radiation dose distribution of the entire radiation field.
+
+To address this, inverse reconstruction technology for radiation fields has been developed. Ting Li et al. (\cite{IDW}) proposed a rapid inversion method for three-dimensional radiation fields in maritime nuclear emergencies based on the Inverse Distance Weighting (IDW) method. Hua Li et al. (\cite{LihuaKriging}) proposed the interpolation and application of Kriging theory in radiation dose fields and compared it with the Inverse Distance Weighting method. Wen Zhou et al. (\cite{bp}) proposed a technique for reconstructing radiation fields based on neural networks. 
+Additionally, Shangzhen Zhu et al. (\cite{zhu202231}) proposed a CH-based inverse algorithm for reconstructing a 3-D gamma dose rate field from sparse and arbitrarily-positioned measurements, demonstrating a minimal error of below 2.1\%. In a related study by the same team, they developed a TVH1-based inverse algorithm (\cite{zhu202232}) that reconstructs the 3-D gamma radiation field with high precision, achieving a relative error as low as 2.18\% with limited measurements for multiple radioactive sources.
+The advantages of inverse reconstruction methods are:
+(1) They utilize measured data to reflect the true radiation field distribution;
+(2) They do not require precise source information, making them suitable for unknown sources;
+(3) They generally have high computational efficiency, enabling rapid reconstruction results.
+However, they also have disadvantages:
+(1) The results are highly influenced by the quality and density of the monitoring data;
+(2) They can only calculate data within or near the range of the monitoring data and cannot perform extrapolation.
+
+Although significant progress has been made in the technology of inverse reconstruction of radiation fields, existing technologies mainly focus on the reconstruction of static radiation fields (\cite{LiHua2}). For dynamic radiation fields, existing reconstruction methods are typically constrained to two-dimensional radiation fields (\cite{possionkrige}) or three-dimensional radiation fields with coarse grid divisions (\cite{3Dradiation}). To achieve the goal of personnel dose optimization, refined grid division is essential. Coarse grid division fails to accurately capture the radiation dose distribution in local areas of the human body, while refined grid division can more accurately describe the geometric shapes and radiation dose distribution in different parts of the body. This allows for the development of more effective dose optimization schemes, ultimately reducing personnel doses and improving radiation protection levels.
+
+To refine and realize real-time radiation field reconstruction, it is necessary to calculate the dose rates at numerous spatial locations in a short period, which imposes stringent speed requirements on the algorithms used. In response to this demand, researchers have undertaken investigations. Xinpeng Li et al. (\cite{li2019accurate}) proposed a novel method that transforms the time-consuming three-dimensional integral in the dose rate model into a convolution problem, using the Fast Fourier Transform (FFT) to accelerate the computation, achieving up to a 1e5-fold speedup.Building on this, Sheng Fang et al. (\cite{fang2020fast}) developed a NFFT method for rapidly evaluating the 3-D gamma dose rate field in scenarios with complex atmospheric radionuclide distributions on non-uniform grids, avoiding the grid-dependent interpolation errors associated with the FFT-based convolution method, while achieving a 100-fold speedup. Mingliang Xie et al. (\cite{MCac}) designed a rapid radiation field calculation program NPTS based on CPU parallel technology, shortening the running time of Monte Carlo simulations. Zhihui Xu et al. (\cite{GPPK}) developed a rapid $\gamma$ dose rate calculation program GPPK based on GPU parallel technology, improving the calculation efficiency of the point kernel method and achieving fast dose rate calculations in virtual simulations. 
+
+Compared with CPU parallelism, GPU parallelism has a more significant acceleration effect. This paper adopts GPU parallelism to accelerate the Kriging algorithm in the inverse reconstruction algorithm and integrates data.partitioning strategy to reduce hardware resource consumption and further enhance the acceleration effect.
+\section{Kriging Algorithm}\label{section2}
+
+\subsection{Introduction to the Kriging Algorithm}
+The Kriging algorithm (\cite{krigingorigin}) is a geostatistical spatial interpolation method based on regionalized variable theory. It assumes that spatial phenomena exhibit a certain spatial correlation and structure throughout the study area and treats them as regional variables. The basic theoretical assumption of the Kriging algorithm is that the correlation between spatial data decreases as the distance increases. To describe this spatial structure and correlation, the concept of a variogram is introduced. The variogram calculates the average variance of data values at different separation distances, thereby quantifying the degree of spatial correlation. Common variogram models include the spherical model, exponential model, and Gaussian model. Based on the description of the spatial structure by the variogram, the Kriging algorithm further determines the Best Linear Unbiased Prediction (BLUP) coefficients to make optimal predictions of data values at unknown locations. During the prediction process, unknown points near known sampling points receive larger weights, while those farther away receive smaller weights, thus reflecting the characteristics of spatial data correlation and continuity.
+
+In radiation field reconstruction, the Kriging algorithm can interpolate and predict the distribution of radiation dose rates or deposition amounts across an entire area based on limited monitoring station data. Compared with other interpolation methods, such as Inverse Distance Weighting (IDW) (\cite{IDWuse}), the advantage of the Kriging algorithm lies in its ability to better describe and utilize the spatial correlation of the radiation field (\cite{LihuaKriging}). By analyzing the variogram of the monitoring data, an appropriate model can be established to characterize the degree of correlation between monitoring values at different distances.
+
+Over the years, the Kriging algorithm has been applied in various fields such as dosimetric monitoring of the human body (\cite{krigingpersondose}), radiation field reconstruction after radioactive accidents (\cite{FUDAOnuclear}), and mapping of radiation dose rate distributions (\cite{krigingdoserate}). It has contributed to environmental radiation monitoring and risk assessment (e.g., interpolation of radiation fields after the Chernobyl accident) and holds significant potential applications in the field of nuclear and radiation protection.
+
+\subsection{Principle of the Kriging Algorithm}
+
+Let $Z(x)$ be a regional variable defined on $R_d$, where $x \in D \subset R_d$, and $D$ is the study area.
+
+The goal of the Kriging algorithm is to make unbiased predictions of the value at any unknown point $x_0 \in D$, denoted as $Z^*(x_0)$, based on the known data at spatial locations $\{x_1, \cdots, x_n\}$, $\{Z(x_1), \cdots, Z(x_n)\}$. To describe the spatial structure of $Z(x)$, the empirical variogram is introduced:
+\begin{equation}
+\gamma(h) = \frac{1}{2N(h)}\sum_{i=1}^{n}{[Z(x_i) - Z(x_i+h)]^2}
+\end{equation}    
+where $N(h)$ is the number of data pairs $(x_i, x_i+h)$.
+The empirical variogram often lacks a specific functional form, making it impossible to solve for unknown points directly. Therefore, theoretical semivariogram models with specific forms are introduced.
+
+Common theoretical semivariogram models include the linear model, exponential model, Gaussian model, and spherical model. In this paper, the exponential model is used as the theoretical semivariogram model:
+\begin{equation}
+\gamma(h; \theta) = c_0 + c_1\left(1 - \exp\left(-\frac{h}{a_1}\right)\right), \quad h > 0
+\end{equation}
+By fitting the theoretical model $\gamma(h;\theta)$ to the known data values, the parameters of the semivariogram model $\theta=[c_0, c_1, a_1]$ are estimated.
+
+In the Kriging algorithm, $Z^*(x_0)$ is expressed as a linear combination of the known points:
+\begin{equation}
+Z^*(x_0) = \sum_{i=0}^{n}{{\lambda}_i(x_0)Z(x_i)}
+\end{equation}
+where ${\lambda}_i(x_0)$ are the weights to be determined, which must satisfy the constraints of linear unbiasedness and minimum variance:
+
+\begin{enumerate}
+
+\item The constraint of linear unbiasedness, i.e., $E[Z^{*}(x_{0}) - Z(x_{0})] = 0$.\vspace*{-0.5em}
+\begin{equation}
+\begin{aligned}
+E[Z^{*}(x_{0})-Z(x_{0})]&=E[\sum_{i=1}^{n}\lambda_{i}Z(x_{i})-Z(x_{0})]\\
+&=\sum_{i=1}^n\lambda_iE[Z(x_i)]-E[Z(x_0)]\\
+&=\left(\sum_{i=1}^{n}\lambda_{i}\right)m-m=0\\
+&\Rightarrow\sum_{i=1}^{n}\lambda_{i}=1
+\end{aligned}
+\end{equation}
+where $m$ denotes the mean of the regional variable.
+
+\item The constraint of minimum variance, i.e., under the condition of unbiasedness, the variance of the Kriging prediction should be minimized.
+\begin{equation}
+\resizebox{.9\hsize}{!}{$
+\begin{aligned}
+&\text{Var}[Z^*(x_0) - Z(x_0)] \\
+& = \text{Var}\left[\sum_{i=1}^n \lambda_i Z(x_i) - Z(x_0)\right] \\
+& = \text{Var}\left[\sum_{i=1}^n \lambda_i Z(x_i)\right] + \text{Var}[Z(x_0)] - 2\text{Cov}\left[\sum_{i=1}^n \lambda_i Z(x_i), Z(x_0)\right]
+\end{aligned}
+$}
+\end{equation}
+Since $\sum_{i=1}^n \lambda_i = 1$ and there is spatial correlation between $Z(x_i)$ and $Z(x_0)$, this can be further simplified to:
+\begin{equation}
+\resizebox{.9\hsize}{!}{$
+\begin{aligned}
+&\text{Var}[Z^*(x_0) - Z(x_0)]\\ 
+& = \sum_{i=1}^n \sum_{j=1}^n \lambda_i \lambda_j \gamma(x_i - x_j) + \gamma(x_0 - x_0) - 2\sum_{i=1}^n \lambda_i \gamma(x_i - x_0)
+\end{aligned}
+$}
+\end{equation}
+where $\gamma(\cdot)$ represents the semivariogram, and $x_i-x_j$ represents the Euclidean distance between two points.
+To minimize (6) under the constraint (4), the Lagrange multiplier method is used to construct a Lagrange function (7), and then the partial derivatives of (7) with respect to the weights are set to zero.
+\begin{equation}
+\resizebox{.9\hsize}{!}{$
+L(\lambda_i, \mu)=\mathrm{Var}[Z^*(x_0)-Z(x_0)]+\mu\left(\sum_{i=1}^n\lambda_i-1\right)
+$}
+\end{equation}
+Taking the partial derivative, we get:
+\begin{equation}
+\resizebox{.9\hsize}{!}{$
+\frac{\partial L}{\partial\lambda_k}=2\sum_{i=1}^n\lambda_i\gamma(x_i-x_j)-2\gamma(x_k-x_0)+\mu=0
+$}
+\end{equation}
+where $\mu$ represents the Lagrange multiplier. Rearranging this yields the Kriging system of equations:
+\begin{equation}
+\sum_{i=1}^n\lambda_i\gamma(x_i-x_j)+\mu=\gamma(x_k-x_0)
+\end{equation}
+in matrix form (with the right-hand side vector being unknown, which can be calculated using the fitted theoretical variogram model).
+\begin{equation}
+\begin{bmatrix}
+\gamma_{11} & \gamma_{12} & \cdots & \gamma_{1n} & 1 \\
+\gamma_{21} & \gamma_{22} & \cdots & \gamma_{2n} & 1 \\
+\vdots & \vdots & \ddots & \vdots & \vdots \\
+\gamma_{n1} & \gamma_{n2} & \cdots & \gamma_{nn} & 1 \\
+1 & 1 & \cdots & 1 & 0
+\end{bmatrix}
+\begin{bmatrix}
+\lambda_1 \\ \lambda_2 \\ \vdots \\ \lambda_n \\ \mu
+\end{bmatrix}
+=
+\begin{bmatrix}
+\gamma_{10} \\ \gamma_{20} \\ \vdots \\ \gamma_{n0} \\ 1
+\end{bmatrix}
+\end{equation}
+\end{enumerate}
+\section{GPU accelerated kriging interpolation}\label{section3}
+\subsection{Introduction to GPU}
+GPU (\cite{gpu}) is initially designed for graphics rendering, accelerating the generation and display of computer graphics. However, due to its parallel computing capabilities, the GPU has gradually been applied to general-purpose computing. Compared with traditional Central Processing Units (CPUs), the GPU has hundreds or even thousands of small processing units, called Streaming Processors, which can execute a large number of similar computing tasks simultaneously.
+
+\begin{figure}[htbp]
+\centering
+\begin{subfigure}[b]{0.48\columnwidth}
+  \centering
+  \resizebox{0.75\columnwidth}{!}{\begin{tikzpicture}
+\draw[fill=yellow!20] (0, 4) rectangle (2, 6); 
+\node at (1, 5) {Control};
+\draw[fill=green!20] (2, 4) rectangle (4, 5); 
+\node at (3, 4.5) {Processor};
+\draw[fill=green!20] (2, 5) rectangle (4, 6); 
+\node at (3, 5.5) {Processor};
+\draw[fill=green!20] (4, 4) rectangle (6, 5); 
+\node at (5, 4.5) {Processor};
+\draw[fill=green!20] (4, 5) rectangle (6, 6); 
+\node at (5, 5.5) {Processor};
+
+\draw[fill=gray!20] (0, 0) rectangle (6, 1); 
+\node at (3, 0.5) {Memory};
+
+\draw[fill=blue!20] (0, 1) rectangle (6, 4); 
+\node at (3, 2.5) {Cache};
+\end{tikzpicture}}
+  \caption{CPU memory model}
+  \label{fig:external_tikz1}
+\end{subfigure}
+\begin{subfigure}[b]{0.48\columnwidth}
+  \hspace*{1.5em}
+  \centering
+  \resizebox{0.95\columnwidth}{!}{\begin{tikzpicture}
+
+\draw[fill=green!20] (4, 4) rectangle (24, 24); 
+\draw (4, 4) grid (24, 24);  
+
+\draw[black, thick] (23.5, 23.5) -- ++(1, 1) node[right, scale=4] {Processor};
+
+\draw[fill=gray!20] (0, 0) rectangle (24, 4); 
+\node[scale=4] at (12, 2) {Memory};
+
+\foreach \x in {0, 1, 2, 3, 4}{
+\draw[fill=yellow!20] (0, 6 + \x * 4) rectangle (6, 6 + \x * 4 + 2); 
+\node[scale=4] at (3, 6 + \x*4 + 1) {Control};
+}
+
+\foreach \x in {0, 1, 2, 3, 4}{
+\draw[fill=blue!20] (0, 4 + \x * 4) rectangle (6, 4 + \x * 4 + 2); 
+\node[scale=4] at (3, 4 + \x*4 + 1) {Cache};
+}
+\end{tikzpicture}}
+  \caption{GPU memory model}
+  \label{fig:external_tikz2}
+\end{subfigure}
+\caption{\rmfamily Memory Model}
+\end{figure}
+
+The parallel computing capability of GPUs stems from their use of multiple computing cores and highly optimized storage structures. They adopt the Single Instruction Multiple Thread (SIMT) architecture, enabling each computing core to execute instructions for multiple threads simultaneously. This architecture allows GPUs to process data in a highly parallel manner, thereby accelerating the computing process. 
+\subsection{How gpu accelerating algorithms}
+GPU acceleration can utilize various programming models, such as CUDA (for NVIDIA GPUs) and OpenCL (cross-platform). These programming models provide a set of programming APIs and tools that enable developers to write code that can be executed on GPUs. This paper introduces and utilizes the CUDA model developed by NVIDIA (\cite{cuda}).
+
+In CUDA programming, the GPU thread model consists of threads, blocks, and grids. These are executed and managed by streaming processors, multiprocessors (composed of multiple streaming processors), and the entire system consisting of all multiprocessors in the GPU hardware structure, respectively. Thread blocks are the smallest parallel execution units on the GPU, each containing multiple threads organized in a two-dimensional or three-dimensional structure (see Fig \ref{fig:external_tikz3}).
+\begin{center}
+\resizebox{0.85\columnwidth}{!}{\begin{tikzpicture}[
+    >=stealth, 
+    node distance = 0, 
+    grid/.style = {draw, fill=gray!10, rectangle, minimum height=0.8\columnwidth, minimum width=0.8\columnwidth}, 
+    block/.style = {draw, fill=blue!50, rectangle, minimum height=0.8\columnwidth/3, minimum width=0.8\columnwidth/2}, 
+    outblock/.style = {draw, fill=orange!50, rectangle, minimum height=0.3\columnwidth, minimum width=0.3\columnwidth}, 
+    thread/.style = {draw, fill=green!50, rectangle, minimum height=0.15\columnwidth, minimum width=0.15\columnwidth}
+]
+
+\node (grid) [grid] {};
+
+\foreach \x in {1, 2} {
+    \foreach \y in {1, 2, 3} {
+        \node (block-\x-\y) [block, xshift= 1.1\columnwidth/4 + \columnwidth/2*(\x - 1), above=0.8\columnwidth/12 + \columnwidth/3*(\y - 1) of grid.south west] {Block (\x, \y)};
+    }
+}
+
+\node (outblock) [outblock, left = 0.2\columnwidth of block-1-1, yshift=0.25\columnwidth] {};
+
+
+\foreach \x in {1, 2} {
+    \foreach \y in {1, 2} {
+        \node (thread-\x-\y) [thread, inner sep = 0, xshift=0.075\columnwidth+0.15\columnwidth*(\x-1) , yshift=0.075\columnwidth+0.15\columnwidth*(\y-1) , font=\scriptsize] at (outblock.south west){thread (\x, \y)} ;
+    }
+}
+
+
+\draw (block-1-2) [->] -- (outblock);
+
+\draw[dashed] (grid.south west) -- (block-1-1.south west);
+\draw[dashed] (grid.south east) -- (block-2-1.south east);
+\draw[dashed] (grid.north west) -- (block-1-3.north west);
+\end{tikzpicture}
+}
+\captionof{figure}{Two-dimensional GPU thread model}
+\label{fig:external_tikz3}
+\end{center}
+
+Thread blocks can be executed in parallel on multiple streaming processors on the GPU. CUDA provides built-in variables that can obtain information such as the thread index and the block index of each thread. A grid is a collection of thread blocks, which can be one-dimensional or two-dimensional structures. In CUDA programming, the size of the grid and the size of the thread block can be specified to control the scale and organization of parallel execution.
+
+\subsection{Algorithm steps of kriging}
+\noindent The general procedure of the kriging interpolation algorithm is as follows (see Fig \ref{fig:kriging}): 
+
+\begin{enumerate}
+\item Specify the known data
+\begin{itemize}
+\item Define the parameter "lags" as the number of distance groups, which determine the segmentation of distance intervals between known points.
+\item Specify the coordinates and values of the known points as $\{x_i\}\ (i\in[1, n])$.
+\item Identify the location of the unknown point as $x_0$.
+\end{itemize}
+\item Compute the required values for the following steps.
+\begin{itemize}
+\item Compute the vector of pairwise distances between known points, denoted as $\{d_{ij}\}$, with a dimension of $(n \times n, 1)$.
+\item Compute the vector of distances between known points and the unknown point, represented as $\{d_{i0}\}$, with a dimension of $(n, 1)$.
+\item Compute the vector of pairwise semivariances between known points, denoted as $\{{\gamma}_{ij}\}$, with a dimension of $(n\times n, 1)$.
+
+\item Combine the distance vector and the semivariance vector into pairs, forming a distance-semivariance vector set $\{(d_{ij}, \gamma_{ij})\}$ with a dimension of $(n \times n, 2)$.
+\item Compute the Kriging matrix, denoted as $M_{\gamma}$, representing the semivariance matrix between known points, with dimensions of $(n, n)$.
+\end{itemize}
+\item Derive the augmented Kriging matrix $K$ from the Kriging matrix $M_{\gamma}$, which is defined as follows:
+\begin{equation}
+\mathbf{K} = \begin{bmatrix}
+\mathbf{M}_\gamma & \mathbf{I} \\
+\mathbf{I}^T & 0
+\end{bmatrix}
+\end{equation}
+where, $\mathbf{M}_\gamma$ is the original Krige matrix, $\mathbf{I}$ is an $n \times 1$ unit vector, and $\mathbf{I}^T$ is the transpose of $\mathbf{I}$.
+\item Group the distance-semivariance vector pairs according to the interval $[d_{\text{min}}, d_{\text{max}}]$ based on the number of distance groups.
+\item Calculate the average distance and semivariance for each group, forming the average distance-semivariance vector pair $\{(\overline{d_k}, \overline{{\gamma}_k})\}$, with a size of $([\frac{n\times n}{lags}] + 1, 2)$.
+\item Select the exponential model as the theoretical semivariogram model.
+\item Estimate the parameters $\theta$ of the semivariance model $\gamma(h; \theta)$ by fitting them to the distance-semivariance vector pair $\{(d_{ij}, \gamma_{ij})\}$.
+\item Compute the vector of semivariances between known points and the unknown point, denoted as $\{\gamma_{i0}\}$, by substituting $\{d_{i0}\}$ into the fitted theoretical semivariance model.
+\item Combine the obtained augmented Kriging matrix $K$, the vector of semivariances between known points and the unknown point denoted as $\{{\gamma}_{i0}\}$, and the Kriging interpolation weights for each unknown point into the matrix form of the Kriging equations:
+\begin{equation}
+K
+\begin{bmatrix}
+\lambda_1 \\ \lambda_2 \\ \vdots \\ \lambda_n \\ \mu
+\end{bmatrix}
+=\begin{bmatrix}
+\mathbf{M}_\gamma & \mathbf{I} \\
+\mathbf{I}^T & 0
+\end{bmatrix}
+\begin{bmatrix}
+\lambda_1 \\ \lambda_2 \\ \vdots \\ \lambda_n \\ \mu
+\end{bmatrix}=
+\begin{bmatrix}
+{\gamma}_{10} \\ {\gamma}_{20} \\ \vdots \\ {\gamma}_{n0} \\ 1
+\end{bmatrix}
+\end{equation}
+\item Solve the Kriging equations, typically by computing the generalized inverse of the coefficient matrix, to determine the weights $\{\lambda_i\}$.
+\item Substitute $\{{\lambda}_i\}$ into the equation to determine the attribute value at the unknown point.
+\end{enumerate}
+
+The above algorithm process is the prediction process for a single point. When predicting multiple points, a single point will become a $1\times m$ vector, and the corresponding vector will be expanded by a dimension of the number of samples $m$ to form a matrix.
+
+\begin{figure*}[ht]
+    \centering
+    \includegraphics[width=\textwidth, height = 0.55\textwidth]{picture3.pdf}
+    \caption{\rmfamily Flowchart for Kriging Algorithm}
+    \label{fig:kriging}
+\end{figure*}
+
+\subsection{Algorithm time complexity analysis}
+To optimize the performance of the Kriging algorithm, it is crucial to identify the most time-consuming steps involved in its utilization for radiation field reconstruction. The specific steps of the Kriging algorithm can be divided into two parts: training and prediction. The training phase encompasses steps 1-7 of the algorithm, while the prediction phase covers steps 8-11. The time complexity of each algorithm step is determined by the number of elementary operations it requires, ignoring constant factors. The time complexity of the training phase is stated as $O(n\times n)$, and that of the prediction phase as $O(n\times n\times m)$. Among the steps, the most time-consuming ones are steps 8 and 10.
+
+Step 8 involves computing the theoretical semivariance model by substituting the distance matrix $D^n_m = [\{d_{i0}^1\}, \cdots, \{d_{i0}^m\}]$, which contains the distances between all unknown points $\{x_0^k\}\ (k\in [1, m])$ and the known points $\{x_i\}\ (i\in [1, n])$ . Step 10 necessitates calculating the inverse of an $n \times n$ matrix and subsequently performing matrix multiplication with another matrix $G^n_m = [\{{\gamma}_{i0}^1\}, \{{\gamma}_{i0}^2\}, \cdots, \{{\gamma}_{i0}^m\}]$ (of size $n\times m$), which contains the semivariances between all unknown points and known points, The final result of this operation is the weight matrix $\Gamma = [\{{\lambda}_{i}^1\}, \{{\lambda}_{i}^2\}, \cdots, \{{\lambda}_{i}^m\}]$.
+
+\subsection{GPU Acceleration Strategy for Kriging}
+
+GPU parallel acceleration involves distributing independent elementary operations across multiple GPU threads and executing them concurrently to minimize the execution time. A single elementary operation is referred to as a kernel function. The key to GPU acceleration lies in designing an appropriate thread model and kernel functions tailored to the specific problem at hand. By conducting a complexity analysis, we can devise suitable thread models and develop corresponding kernel functions for steps 8 and 10.
+
+\subsubsection{Thread Model and Kernel Function for Step 8}
+
+For optimal hardware utilization in the CUDA thread model, certain constraints apply to the thread block and grid sizes: A thread block must comprise a minimum of 128 threads and a maximum of 1024 threads, with the total count being a multiple of 32. Additionally, the total number of thread blocks within a grid must not exceed $2^{31}-1$. While reaching this maximum limit is typically challenging, it suffices to set the total thread count in the grid to exceed the required computational workload for the problem.
+
+The choice of thread model dimensions depends on the output data. In step 8, which yields an $n\times m$ matrix, defining the thread model as follows: The grid dimensions are determined by $\left(\left[\frac{m}{16}\right]+1, \left[\frac{n}{16}\right]+1\right)$, while the thread block size is fixed at $(16, 16)$, with $\left[\cdot\right]$ denoting rounding down. Fig \ref{fig:thread_model} illustrates the storage arrangement of the elements.
+\begin{figure}
+    \centering
+    \includegraphics[width=0.8\columnwidth]{picture1.pdf}
+    \caption{\rmfamily The Thread Model of step 8}
+    \label{fig:thread_model}
+\end{figure}
+In step 8, every element of $D^n_m$ undergoes a transformation based on the variance model $f(d; \theta)$, followed by assignment to the result matrix $A$, It should be noted that A in step 8 specifically denotes $G_m^n$. The kernel function is implemented as depicted in Algorithm \ref{alg1}.
+\begin{algorithm}[H]
+\textsl{}\setstretch{1}
+\caption{kernel function of step 8} 
+\renewcommand{\algorithmicrequire}{\textbf{Input:}}
+\renewcommand{\algorithmicensure}{\textbf{Output:}}    
+\label{alg1} 
+\small
+\begin{algorithmic}[1]
+\REQUIRE $m$, $n$, $D^n_m$, result matrix $G^n_m$
+\STATE idx = blockIdx.x * blockDim.x + threadIdx.x
+\STATE idy = blockIdx.y * blockDim.y + threadIdx.y
+\IF{$idx <= m$ and $idy <= n$} 
+\STATE $G^n_m[idy][idx] = f(D^n_m[idy][idx])$
+\ENDIF  
+\end{algorithmic} 
+\end{algorithm}
+
+\subsubsection{Thread Model and Kernel Function for Step 10}
+
+The output of Step 10 has the same size as Step 8, an $m\times n$ matrix. Therefore, the same thread model can be used for both steps, as shown in Fig \ref{fig:thread_model}. 
+Step 10 computes the element-wise product of $G^n_m$ and $K^{-1}$, aggregating the results into the matrix $\Gamma$. The kernel function is defined in Algorithm \ref{alg2}.
+\begin{algorithm}[H]
+\textsl{}\setstretch{1}
+\caption{kernel function of step 10} 
+\renewcommand{\algorithmicrequire}{\textbf{Input:}}
+\renewcommand{\algorithmicensure}{\textbf{Output:}}    
+\label{alg2} 
+\small
+\begin{algorithmic}[1]
+\REQUIRE $m$, $n$, $G^n_m$, $K^{-1}$, result matrix $\Gamma$
+\STATE idx = blockIdx.x * blockDim.x + threadIdx.x
+\STATE idy = blockIdx.y * blockDim.y + threadIdx.y
+\IF{$idx <= m$ and $idy <= n$} 
+\STATE $\Gamma[idy][idx] = \sum_i^n{K^{-1}[idy][i] * G^n_m[i][idx]}$
+\ENDIF  
+\end{algorithmic} 
+\end{algorithm}
+
+
+\subsubsection{Combining the Two Steps}
+
+The calculation of step 10 depends on the result of step 8, necessitating a serial process where step 8 precedes step 10. However, a more detailed analysis reveals that the serial relationship between the two steps applies solely to the calculations of individual matrix elements; the computations involving pairs of elements remain parallel.
+
+Furthermore, both steps share identical thread models. Hence, the sequential aspect concerning elements can be integrated within a single kernel function, consolidating the two kernel functions into one, as illustrated in Algorithm \ref{alg3}.
+
+\begin{algorithm}[H]
+\textsl{}\setstretch{1}
+\caption{kernel function of step 8 and step 10} 
+\renewcommand{\algorithmicrequire}{\textbf{Input:}}
+\renewcommand{\algorithmicensure}{\textbf{Output:}}    
+\label{alg3} 
+\small
+\begin{algorithmic}[1]
+\REQUIRE $m$, $n$, $D^n_m$, $K^{-1}$, result matrix $\Gamma$
+\STATE idx = blockIdx.x * blockDim.x + threadIdx.x
+\STATE idy = blockIdx.y * blockDim.y + threadIdx.y
+\STATE $swap = f(D^n_m[idy][idx])$
+\IF{$idx <= m$ and $idy <= n$} 
+\STATE $\Gamma[idy][idx] = \sum_i^n{K^{-1}[idy][i]} * swap$
+\ENDIF  
+\end{algorithmic} 
+\end{algorithm}
+\subsubsection{Data Block Strategy}
+
+The memory execution sequence of the Kriging algorithm on the GPU proceeds as follows: Initially, data is generated and processed within the GPU's video memory; subsequently, upon obtaining the results, they are transferred to the CPU's memory. However, when dealing with substantial computational loads, insufficient video memory (or general memory) can arise, potentially leading to algorithmic execution failures. For instance, considering $m = 10^6$ prediction points and $n = 2\times 10^3$ known points, with a precision requirement of $float32$, the space required for step 10 on the GPU is as follows:
+
+\vspace*{1em}
+
+\noindent(1) An $m\times n$ matrix, occupying a video memory size of $10^6*2000*4$ bytes = 7.6GB; 
+
+\noindent(2) An $n\times n$ matrix, occupying a video memory size of $2000*2000*4$ bytes = 15.3MB; 
+
+\noindent(3) The result matrix, occupying a video memory size of $10^6*2000*4$ bytes = 7.6GB;
+
+\vspace*{1em}
+
+The total video memory consumption amounts to 15.8GB, surpassing the typical video memory capacities of consumer-grade graphics cards, which typically range from 6 to 12GB. While a straightforward solution to this dilemma involves augmenting the video memory capacity, such as through the utilization of multiple GPUs in parallel or the adoption of professional-grade graphics cards, this approach inevitably escalates prediction expenditures and curtails flexibility. In pursuit of a more nuanced resolution, this paper advocates for the implementation of a data block strategy to facilitate GPU acceleration of the Kriging algorithm. The outlined strategy is delineated as follows:
+
+\begin{enumerate}
+\item Divide $D^n_m$ and $G^n_m$ by rows to create block matrices $[D^n_{m_1}, D^n_{m_2}, \cdots, D^n_{m_p}], $ $[G^n_{m_1}, G^n_{m_2}, \cdots, G^n_{m_p}], $ where $\sum_{i=1}^{p}{m_i} = m$
+\vspace*{1em}
+\item Plug the block matrices into Steps 8 and 10, resulting in
+
+\begin{equation}
+\begin{aligned}
+[G^n_{m_1}, G^n_{m_2}, \cdots, G^n_{m_p}] &= f(D^n_m) \\
+ &= [f(D^n_{m_1}), f(D^n_{m_2}), \cdots, f(D^n_{m_p})]\\
+% \end{aligned}
+% \end{equation}
+% \begin{equation}
+% \begin{aligned}
+[{\Gamma}_{m_1}, {\Gamma}_{m_2}, \cdots, {\Gamma}_{m_p}] &= \\
+&[K^{-1}G^n_{m_1}, K^{-1}G^n_{m_2}, \cdots, K^{-1}G^n_{m_p}]\\
+\end{aligned}
+\end{equation}
+
+\item Combine the calculated block matrices $[\Gamma_{m_1}, \Gamma_{m_2}, \cdots, \Gamma_{m_p}]$ to obtain $\Gamma$. $\Gamma$ is the matrix composed of the weight vectors corresponding to all prediction points.
+\end{enumerate}
+
+Fig \ref{fig:thread_model} illustrates the data exchange process between the CPU and GPU when implementing the data block strategy. This approach decomposes the matrix calculations, which initially consumed significant video memory, into numerous smaller calculation tasks, consequently reducing the video memory footprint of each task. By employing this strategy, video memory occupation can be effectively minimized, thus alleviating hardware demands for processing extensive datasets. However, an excessive number of blocks may introduce drawbacks, including frequent memory swaps that incur additional overhead and diminish parallelism. Therefore, selecting the optimal block size is imperative to mitigate these challenges and optimize performance for the specific problem at hand.
+
+\begin{figure*}[ht]
+    \centering
+    \includegraphics[width=0.9\textwidth, height = 0.65\textwidth]{picture2.pdf}
+    \caption{\rmfamily Block-Based Data Parallelism}
+    \label{fig:data_block}
+\end{figure*}
+
+\vspace*{1em}
+\section{Simulation and Experiment (1)}
+
+The CPU used in the first experiment is an Intel Core i5-12490F, paired with an NVIDIA GeForce RTX 2080Ti GPU. The system featured 32GB of RAM (2 $\times$ 16GB) operating at a frequency of 3192 MHz, and 11GB of dedicated video memory. The exponential variance model is selected for the Kriging algorithm.
+
+\subsection{Monte Carlo Simulation}
+To assess the impact of GPU acceleration on the prediction accuracy and speed of the Kriging method, we conducted a simulation of a virtual three-dimensional radiation field using the Monte Carlo code Fluka.
+The field, with dimensions of $5 \text{m} \times 5 \text{m} \times 5 \text{m}$ and consisting of air only, is defined by the vertex coordinates: (5m, 5m, 5m), (0m, 0m, 0m), (5m, 5m, 0m), (5m, 0m, 0m), (5m, 0m, 5m), (0m, 5m, 5m), (0m, 5m, 5m) and (0m, 0m, 5m). A radiation source located at (0m, 0m, 0m) emitted gamma rays of energy $0.3 \text{ MeV}$ with a source activity of $10^{11} \text{Bq}$. The total 
+numbers of transport particles are 1e8. Subsequently, the region is discretized into $100 \times 100 \times 100$ grid blocks (totaling $10^6$) using Fluka, each with dimensions of $5 \text{cm} \times 5 \text{cm} \times 5 \text{cm}$. The dose rate in each grid block is then computed.
+
+\begin{center}
+\resizebox{0.6\columnwidth}{!}{
+\tdplotsetmaincoords{-60}{-120}
+\begin{tikzpicture}[tdplot_main_coords, line join=round, line cap=round]
+
+\begin{pgfonlayer}{background}
+  \draw[thick] (0, 0, 0) coordinate (o) -- ++(100, 0, 0) -- ++(0, 100, 0) -- ++(-100, 0, 0) -- cycle; 
+  \draw[thick] (o) -- ++(0, 0, 100) -- ++(0, 100, 0) -- ++(0, 0, -100) -- cycle; 
+  \draw[thick] (o) -- ++(0, 0, 100) -- ++(100, 0, 0) -- ++(0, 0, -100) -- cycle; 
+  \draw[thick] (100, 0, 0) -- ++(0, 100, 0) -- ++(0, 0, 100) -- ++(0, -100, 0) -- cycle; 
+  \draw[thick] (0, 0, 100) -- ++(100, 0, 0) -- ++(0, 100, 0) -- ++(-100, 0, 0) -- cycle; 
+  \draw[thick] (100, 0, 0) -- ++(0, 0, 100) -- ++(0, 100, 0) -- ++(0, 0, -100) -- cycle; 
+\end{pgfonlayer}
+
+\foreach \i in {0, 1, ..., 100} {
+  \draw[very thin] (\i, 100, 0) -- ++(0, 5, 0);
+  \draw[very thin] (100, \i, 0) -- ++(5, 0, 0);
+  \draw[very thin] (100, 100, \i) -- ++(0, 5, 0);
+}
+\draw[very thick] (100, 100, 0) -- node[left=30, font=\fontsize{200}{200}\selectfont] {100 divisions} (100, 100, 100);
+
+\begin{pgfonlayer}{foreground2}
+  \draw[fill=red, opacity=0.5] (o) -- ++(10, 0, 0) -- ++(0, 0, 10) -- ++(-10, 0, 0) -- cycle; 
+  \draw[fill=red, opacity=0.5] (o) -- ++(0, 10, 0) -- ++(0, 0, 10) -- ++(0, -10, 0) -- cycle; 
+  \draw[fill=red, opacity=0.5] (o) -- ++(0, 10, 0) -- ++(10, 0, 0) -- ++(0, -10, 0) -- cycle; 
+  \draw[fill=red, opacity=0.5] (10, 0, 0) -- ++(0, 0, 10) -- ++(0, 10, 0) -- ++(0, 0, -10) -- cycle; 
+  \draw[fill=red, opacity=0.5] (0, 10, 0) -- ++(10, 0, 0) -- ++(0, 0, 10) -- ++(-10, 0, 0) -- cycle; 
+  \draw[fill=red, opacity=0.5] (10, 0, 0) -- ++(0, 10, 0) -- ++(0, 0, 10) -- ++(0, -10, 0) -- cycle; 
+\end{pgfonlayer}
+
+\begin{pgfonlayer}{foreground1}
+  \draw[thick][fill=green, opacity=0.5] (0, 0, 0) coordinate (o) -- ++(30, 0, 0) -- ++(0, 30, 0) -- ++(-30, 0, 0) -- cycle; 
+  \draw[thick][fill=green, opacity=0.5] (o) -- ++(0, 0, 30) -- ++(0, 30, 0) -- ++(0, 0, -30) -- cycle; 
+  \draw[thick][fill=green, opacity=0.5] (o) -- ++(0, 0, 30) -- ++(30, 0, 0) -- ++(0, 0, -30) -- cycle; 
+  \draw[thick][fill=green, opacity=0.5] (30, 0, 0) -- ++(0, 30, 0) -- ++(0, 0, 30) -- ++(0, -30, 0) -- cycle; 
+  \draw[thick][fill=green, opacity=0.5] (0, 0, 30) -- ++(30, 0, 0) -- ++(0, 30, 0) -- ++(-30, 0, 0) -- cycle; 
+  \draw[thick][fill=green, opacity=0.5] (30, 0, 0) -- ++(0, 0, 30) -- ++(0, 30, 0) -- ++(0, 0, -30) -- cycle; 
+\end{pgfonlayer}
+
+  \draw[thick, fill=gray, opacity=0.5] (0, 0, 0) coordinate (o) -- ++(60, 0, 0) -- ++(0, 60, 0) -- ++(-60, 0, 0) -- cycle; 
+\draw[thick, fill=gray, opacity=0.5] (o) -- ++(0, 0, 60) -- ++(0, 60, 0) -- ++(0, 0, -60) -- cycle; 
+\draw[thick, fill=gray, opacity=0.5] (o) -- ++(0, 0, 60) -- ++(60, 0, 0) -- ++(0, 0, -60) -- cycle; 
+\draw[thick, fill=gray, opacity=0.5] (60, 0, 0) -- ++(0, 60, 0) -- ++(0, 0, 60) -- ++(0, -60, 0) -- cycle; 
+\draw[thick, fill=gray, opacity=0.5] (0, 0, 60) -- ++(60, 0, 0) -- ++(0, 60, 0) -- ++(-60, 0, 0) -- cycle; 
+\draw[thick, fill=gray, opacity=0.5] (60, 0, 0) -- ++(0, 0, 60) -- ++(0, 60, 0) -- ++(0, 0, -60) -- cycle; 
+\node[circle, fill, inner sep=40pt] at (0, 0, 0){};
+\node[font=\fontsize{200}{200}\selectfont] at (-5, -5, -5) {Source}; 
+
+\end{tikzpicture}}
+\captionof{figure}{\rmfamily Radiation Field Division}
+\label{fig:external_tikz4}
+\end{center}
+
+Due to the large number of grid blocks, the biasing technique implemented in the Fluka software (\cite{fluka}) is employed to accelerate the simulation and reduce variance. The radiation field region is divided into four distinct regions with varying weights, as illustrated in Fig \ref{fig:external_tikz4}. The four cubes, denoted as box1, box2, box3, and box4, have side lengths of 0.5m, 1.5m, 3m, and 5m, respectively, with increasing size from smallest to largest. The red region, representing box1, is assigned a weight of 1; the green region, encompassing box2-box1, received a weight of 5; the gray region, comprising box3-box2, is assigned a weight of 25; and the white region, corresponding to box4-box3, have a weight of 125. The simulation results are presented in Fig \ref{fig:simulation}.
+
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.9\columnwidth]{basicflairDuodian2-Red2.pdf}
+    \caption{\rmfamily Simulation Results (Normalized by Particle Count)}
+    \label{fig:simulation}
+\end{figure}
+
+\subsection{Verification of GPU Prediction Accuracy}
+
+\begin{table*}
+\centering
+\caption{Average Relative Error for Different Numbers of Points}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{ccccc}
+\toprule
+\textbf{(Known Point Sampling Interval, } & \textbf{Number of } & \textbf{Number of } & \textbf{Average Relative Error of } & \textbf{Average Relative Error of }  \\
+\textbf{Prediction Point Sampling Interval)} & \textbf{Known Points} & \textbf{Prediction Points} & \textbf{CPU Prediction (\%)} & \textbf{GPU Prediction (\%)}  \\
+\midrule
+(24, 2) & 64 & 32768 & 86.4739 & 86.4742\\
+(24, 1) & 64 & 110592 & 89.6461 & 89.6464\\
+(19, 2) & 125 & 32768 & 38.2339 & 38.2340\\
+(19, 1) & 125 & 110592 & 39.9363 & 39.9365\\
+(14, 2) & 343 & 32768 & 7.6765 & 7.6760\\
+(14, 1) & 343 & 110592 & 7.7504 & 7.7500\\
+(9, 2) & 1000 & 32768 & 4.3548 & 4.3548\\ 
+(9, 1) & 1000 & 110592 & 4.4039 & 4.4040\\ 
+(7, 2) & 1728 & 32768 & 4.7983 & 4.8017\\ 
+(7, 1) & 1728 & 110592 & 5.0020 & 5.0055   \\ 
+(6, 2) & 2744 & 32768 & 3.3217 & 3.3215  \\
+(6, 1) & 2744 & 110592 & 3.3562 & 3.3562  \\
+\bottomrule
+\end{tabular}}
+\label{tab:precision2} 
+\end{table*}
+
+The prediction region is defined as a cube with vertices at (5m, 5m, 5m), (0.25m, 0.25m, 0.25m), (5m, 5m, 0.25m), (5m, 0.25m, 5m), (0.25m, 5m, 5m), (0.25m, 0.25m, 5m), (0.25m, 5m, 0.25m) and ( 5m, 0.25m, 0.25m).
+
+For the Kriging algorithm, known points are generated by extracting the intersection coordinates and their corresponding dose rates at every 15th grid division in each dimension, resulting in a total of $(95//15 + 1)^3 = 343$ points. Prediction points for the Kriging algorithm are similarly obtained by extracting the intersection coordinates and their corresponding dose rates at every 3rd grid division in each dimension, resulting in a total of $(95//3 + 1)^3 = 32768$ points. The simulated data is predicted using both CPU and GPU versions of the Kriging algorithm (see Fig \ref{fig:precision}). The average relative error, calculated as $\overline{\varepsilon} = \frac{\sum_{i=1}^{m}{[\hat{Z} - Z(x)]/Z(x)}\times 100\%}{m}$ (where $\hat{Z}$ represents the Fluka simulation value and $Z(x)$ denotes the Kriging algorithm prediction value), is determined for both versions. This yielded an average relative error of 7.6765\% for the CPU prediction and 7.6760\% for the GPU prediction.
+
+To further investigate the accuracy, different known and prediction points are selected, and the average relative error is calculated for each case. The results are presented in Table \ref{tab:precision2}. Table \ref{tab:precision2} reveals that when using identical known and prediction point sampling intervals, the accuracy difference between GPU and CPU prediction results is minimal, generally not exceeding 0.01\%. Furthermore, the accuracy of the algorithm predictions gradually increases as the known point sampling interval decreases. When the known point sampling interval falls below 14, corresponding to a number of known points at 343, which is $\frac{1}{(14+1)^3}=\frac{1}{3375}$ of the total partition number, the prediction accuracy reaching 92.25\%. Furthermore, When the known point sampling interval falls below 6, corresponding to a number of known points at 2744, which is $\frac{1}{(6+1)^3}=\frac{1}{216}$ of the total partition number, the accuracy further improves to 96.65\%.
+
+\begin{figure*}
+    \centering
+    \includegraphics[width=\textwidth]{precision.pdf}
+    \caption{\rmfamily Comparison of GPU, CPU, and simulation predictions for dose rate with a known point sampling interval of 7 and prediction point sampling interval of 2.}
+    \label{fig:precision}
+\end{figure*}
+
+\subsection{GPU Acceleration Performance Testing}
+
+
+\subsubsection{Relationship between Acceleration Performance and Number of Known Points}
+The number of prediction points is set to 110,592. The GPU-kriging data block size is set to 50, 000, resulting in a total of 3 blocks. Fig \ref{fig:TimeWithKnowPoints} presents a comparison of the time consumed by CPU and GPU predictions as the number of known point samples varies.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\columnwidth]{TimeWithTraningPoints.pdf}
+    \caption{\rmfamily Prediction Time with Number of Known Points When Block Size is 50000}
+    \label{fig:TimeWithKnowPoints}
+\end{figure}
+
+As illustrated in Fig \ref{fig:TimeWithKnowPoints}, both CPU and GPU prediction times increase with an increasing number of known points. However, the CPU prediction time exhibits a significantly faster growth rate compared to the GPU prediction time. As the number of known points increases from 343 to 4096, the CPU prediction time significantly increases from 1.61 seconds to 74.87 seconds, representing a 46.5-fold increase. Meanwhile, the GPU prediction time also rises, but at a lower rate, from 0.07 seconds to 1.21 seconds, a 17.3-fold increase.This disparity highlights the substantial computational efficiency advantage offered by GPU-kriging, especially when handling large datasets. The rapid increase in CPU prediction time with increasing known points underscores the limitations of traditional CPU-based kriging when tackling large-scale spatial interpolation tasks. For example, when the number of known points reaches 4096, the CPU prediction time takes 74.87 seconds, whereas the GPU prediction time takes only 1.21 seconds, demonstrating a significant performance improvement.
+
+To further investigate, conduct tests using different data chunk sizes under the above conditions. Table \ref{tab:TimeWithTrainingPoints} show a comparison of the acceleration effects under different block sizes:
+\begin{table*}
+\caption{GPU and CPU Prediction Time and GPU Speedup for Different Numbers of Known Points when the Number of Prediction Points is 110,592}
+\resizebox{\textwidth}{!}{\begin{tabular}{cccccccccc}
+\toprule
+& \multicolumn{3}{c}{\textbf{Block Size: 50000}} & \multicolumn{3}{c}{\textbf{Block Size: 20000}} & \multicolumn{3}{c}{\textbf{Block Size: 10000}} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7} \cmidrule(lr){8-10}
+\textbf{\rmfamily Number of Known Points} & \textbf{\rmfamily GPU Time (s)} & \textbf{\rmfamily CPU Time (s)} & \textbf{\rmfamily Speedup} & \textbf{\rmfamily GPU Time (s)} & \textbf{\rmfamily CPU Time (s)} & \textbf{\rmfamily Speedup} & \textbf{\rmfamily GPU Time (s)} & \textbf{\rmfamily CPU Time (s)} & \textbf{\rmfamily Speedup} \\
+\midrule
+343 & 0.07 & 1.61 & 23.05 & 0.07 & 1.55 & 21.97 & 0.11 & 1.56 & 14.48 \\
+512 & 0.11 & 2.59 & 23.79 & 0.12 & 2.66 & 22.10 & 0.15 & 2.48 & 16.36 \\
+729 & 0.13 & 3.91 & 30.85 & 0.14 & 3.98 & 27.91 & 0.19 & 4.11 & 22.02 \\
+1000 & 0.17 & 5.50 & 32.50 & 0.19 & 5.75 & 30.08 & 0.23 & 5.72 & 24.96 \\
+1331 & 0.22 & 8.05 & 37.42 & 0.24 & 8.61 & 36.17 & 0.32 & 7.96 & 24.62 \\
+1728 & 0.31 & 10.98 & 35.71 & 0.36 & 11.64 & 31.96 & 0.47 & 10.80  & 22.84 \\
+2744 & 0.58 & 20.84 & 35.72 & 0.68 & 21.97 & 32.48 & 0.91 & 20.86 & 22.97 \\
+4096 & 1.21 & 74.87 & 61.76 & 1.49 & 53.60 & 35.88 & 2.10 & 46.64 & 22.26 \\
+\bottomrule
+\end{tabular}}
+\label{tab:TimeWithTrainingPoints}
+\end{table*}
+From Table \ref{tab:TimeWithTrainingPoints}, we can observe:
+\begin{enumerate}
+    \item Across all block sizes and numbers of known points, the GPU consistently achieves significantly faster prediction times compared to the CPU. This demonstrates the substantial advantage of using GPUs for this task.
+    \item The speedup achieved by the GPU (calculated as CPU time / GPU time) is not constant and changes with the block size. Between block sizes of 10,000 and 50,000, larger block sizes generally led to higher speedup.
+\end{enumerate}
+
+
+
+\subsubsection{Relationship between Acceleration Performance and Number of Prediction Points}
+To further validate the acceleration effect of the GPU, the grid division generated by the simulation is refined to create a new grid division. Given the validated GPU prediction accuracy within the prediction region in the previous section, this step is warranted.
+
+The prediction region is subdivided into a $475 \times 475 \times 475$ grid, with each grid cell measuring $1$ cm $\times 1$ cm $\times 1$ cm. The number of known points is set to 512. The GPU-kriging data block size is dynamically determined using the formula:
+$$min\left\{200000, \max\left\{\frac{\text{number of prediction points}}{10}, 20000\right\}\right\}$$
+This adaptive block division allows the number of blocks to adjust dynamically with the number of prediction points. This approach mitigates the negative impact of excessively large block sizes, which can hinder computational efficiency, and avoids excessive block creation, which leads to frequent data transfer and reduces overall efficiency.
+
+A comparison of the time consumed by CPU prediction and GPU prediction as the number of prediction point samples changes is shown in Table \ref{tab:TimeWithPredictPoints}, showing that the GPU acceleration ratio increases with the number of prediction points.
+
+When the number of prediction points is around $2\times 10^5$, the GPU can achieve an acceleration ratio of about 10 times. When the number of prediction points is around $8\times 10^5$, the GPU can achieve an acceleration ratio of 65 times. When the number of prediction points is around $10^7$, the GPU can achieve an acceleration ratio of 93 times.
+
+\begin{table*}
+\caption{GPU and CPU Prediction Time and GPU Speedup for Different Numbers of Prediction Points when the Number of Known Points is 512}
+\resizebox{0.8\textwidth}{0.12\textwidth}{\begin{tabular}{ccccc}
+\toprule
+ \textbf{\rmfamily Number of prediction Points} & \textbf{\rmfamily CPU Prediction Time (s)} & \textbf{\rmfamily GPU Prediction Time (s)} & \textbf{\rmfamily Speedup} \\
+\midrule
+\rmfamily 140608 & \rmfamily 2.46 & \rmfamily 0.35 & \rmfamily 7.70 \\
+\rmfamily 205379 & \rmfamily 2.57 & \rmfamily 0.21 & \rmfamily 12.55 \\
+\rmfamily 238328 & \rmfamily 3.95 & \rmfamily 0.34 & \rmfamily 11.78 \\
+\rmfamily 389017 & \rmfamily 5.84 & \rmfamily 0.37 & \rmfamily 15.71 \\
+\rmfamily 512000 & \rmfamily 12.24 & \rmfamily 0.69 & \rmfamily 17.63 \\
+\rmfamily 857375 & \rmfamily 49.13 & \rmfamily 0.75 & \rmfamily 65.20 \\
+\rmfamily 1771561 & \rmfamily 76.76 & \rmfamily 1.03 & \rmfamily 74.61 \\
+\rmfamily 4019679 & \rmfamily 211.64 & \rmfamily 2.58 & \rmfamily 81.88 \\
+\rmfamily 13481272 & \rmfamily 729.96 & \rmfamily 7.84 & \rmfamily 93.12 \\
+\bottomrule
+\end{tabular}}
+\label{tab:TimeWithPredictPoints}
+\end{table*}
+
+\begin{figure}[htbp]
+    \centering
+    \begin{subfigure}[b]{0.5\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{TimeWithTestingAndBlocks.pdf}
+        \caption{Influence of Block Size on GPU Prediction Time for Varying Prediction Point Counts}
+        \label{fig:Block1}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.5\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{TimeWithTrainingAndBlocks.pdf}
+        \caption{Influence of Block Size on GPU Prediction Time for Varying Known Point Counts}
+        \label{fig:Block2}
+    \end{subfigure}
+
+    \caption{\rmfamily Influence of Block Size on GPU Prediction Time}
+    \label{fig:main}
+\end{figure}
+
+\subsubsection{Relationship between Acceleration Performance and Data Block Size}
+When the block size is excessively small, frequent memory swaps between the GPU and CPU occur, as illustrated in Fig \ref{fig:thread_model}. In this scenario, data exchange becomes the primary bottleneck in program execution. Conversely, when the block size is excessively large, each GPU thread processes a larger amount of data, leading to increased thread execution time. Consequently, the primary bottleneck in program execution shifts to thread computation. To achieve optimal program efficiency, it is crucial to select an appropriate block size that balances data transfer time and thread computation time.
+
+
+To further investigate the relationship between block size and acceleration performance under varying conditions, two sets of sub-experiments are conducted:
+
+(1) The first set of sub-experiments involved fixing the number of known points at 512 and varying the number of prediction points across [314,432, 512,000, 884,736, 1,685,159]. Block sizes are ranged from 5,000 to 500,000 to evaluate the influence of block size on GPU prediction time for different prediction point counts, ultimately identifying the optimal block size for each scenario. The results of this sub-experiment are shown in Fig \ref{fig:Block1}.
+
+(2) The second set of sub-experiments maintained a constant number of prediction points at 857,375 while varying the number of known points across [216, 343, 512, 729]. Block sizes are varied from 5,000 to 500,000 to assess the influence of block size on GPU prediction time for different known point counts, ultimately identifying the optimal block size for each scenario. The results of this sub-experiment are shown in Fig \ref{fig:Block2}.
+
+Fig \ref{fig:Block1} shows that when the number of known points is 512, the GPU-krige prediction time first decreases and then increases as the data block size decreases. Simultaneously, as the number of prediction points increases, the rate of change in prediction time with respect to block size also increases.
+
+Fig \ref{fig:Block2} demonstrates that when the number of prediction points is 857,375, the GPU-krige prediction time first decreases and then increases as the data block size decreases. Similarly, as the number of known points increases, the rate of change in prediction time with respect to block size also increases.
+
+Furthermore, both figures reveal that when the number of known points and prediction points is relatively small, the optimal data block size value is unstable. However, when the data volume is larger, the optimal block size value falls between 60,000 and 90,000.
+
+\section{Simulation and Experiment (2)}
+    The CPU used in the second experiment is still an Intel Core i5-12490F, paired with an NVIDIA GeForce RTX 2080Ti GPU. The system featured 32GB of RAM (2 $\times$ 16GB) operating at a frequency of 3192 MHz, and 11GB of dedicated video memory. The exponential variance model is selected for the Kriging algorithm. In the final part of this section, a simple speed comparison experiment is conducted using the latest-generation GPU 4090 to demonstrate that the acceleration effect of the method presented in this paper can be enhanced with the increase in GPU computing power.
+
+\subsection{Monte Carlo Simulation}
+In the second experiment, a multi-source radiation scenario with shielding is simulated using Fluka. The specific components of the scenario are as follows:
+
+\begin{enumerate}
+\item A rectangular space, measuring 20m in length, 6 meters in width, and 8m in height, is enclosed by 30cm thick concrete on all sides.
+\item A cylindrical lead container, with its base centered at the coordinates (9.7m, 2.7m, 0m) within the rectangular space, has a thickness of 5cm.
+\item A concrete wall spans from 15m to 15.5m along the length of the space, with a thickness of 50cm.
+\item An aluminum door, installed on the concrete wall, measures 2m in height and 1m in width, with a thickness of 50cm.
+\end{enumerate}
+The schematic diagrams of the scenario are shown in Fig \ref{fig:simulation2geo2}.
+
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{DiagramOfSimulation2.pdf}
+\caption{\rmfamily Schematic Diagram of Simulation 2}
+\label{fig:simulation2geo2}
+\end{figure*}
+
+In the second simulation, two source terms are established. The first source is located at the coordinates (970cm, 270cm, 20cm), emitting gamma rays with an energy of 3 MeV. The second source, also situated at (1970cm, 570cm, 430cm), emits gamma rays with an energy of 0.8 MeV. Both sources have an activity of $10^9$ Bq, and the number of particles transported in the Monte Carlo simulation is set to 1e8. The simulation results are depicted in Fig \ref{fig:simulation2geo3} and Fig \ref{fig:simulation2result}.
+
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{simulation2model.pdf}
+\caption{\rmfamily Simulation 2 Model}
+\label{fig:simulation2geo3}
+\end{figure*}
+
+\begin{figure*}
+\centering
+\includegraphics[width=.9\textwidth]{simulation2result.jpg}
+\caption{\rmfamily Simulation 2 Results (Normalized by Particle Count)
+}
+\label{fig:simulation2result}
+\end{figure*}
+
+Like the first simulation, the simulation space is divided into a grid of $100 \times 100 \times 100$ blocks, and the simulation results are used to test the predictive accuracy and acceleration efficiency of the improved Kriging algorithm.
+
+\subsection{Verification of GPU Prediction Accuracy}
+The prediction region encompasses the entire space. We evaluated the model's accuracy by predicting 32,768 prediction points using 1000 known points. The resulting relative error is 14.0556\%. A visual comparison is provided in Fig \ref{fig:precision2}. Then for further investigating the variations of accuracy, different known and prediction points are selected. The setup is similar to that in Table \ref{tab:precision2} to test the prediction accuracy of the improved Kriging algorithm and to compare it with the prediction accuracy from the first simulation. The results are shown in Table \ref{tab:precision3}.
+
+It can be observed that the trend in prediction accuracy with changes in the number of known and predicted points is consistent with that in Experiment 1. Additionally, the consistency in prediction accuracy between the CPU and GPU results is also in line with Experiment 1. However, as the complexity of the radiation scenario increases, the prediction accuracy in Experiment 2 decreases compared to Experiment 1. When the known point sampling interval falls below 9, corresponding to a number of known points at 343, which is $\frac{1}{(9+1)^3}=\frac{1}{1000}$ of the total partition number, the prediction accuracy reaching 83.92\%. Furthermore, When the known point sampling interval falls below 4, corresponding to a number of known points at 8000, which is $\frac{1}{(4+1)^3}=\frac{1}{125}$ of the total partition number, the accuracy further improves to 91.17\%.
+
+\begin{figure*}
+    \centering
+    \includegraphics[width=\textwidth]{precision2.pdf}
+    \caption{\rmfamily Comparison of Dose Rate Predictions from GPU-Kriging, CPU-Kriging, and Simulation using 1000 Known Points and 857,375 Prediction Points.}
+    \label{fig:precision2}
+\end{figure*}
+
+\begin{table*}
+\centering
+\caption{Average Relative Error for Different Numbers of Points}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{ccccc}
+\toprule
+\textbf{(Known Point Sampling Interval, } & \textbf{Number of } & \textbf{Number of } & \textbf{Average Relative Error of } & \textbf{Average Relative Error of }  \\
+\textbf{Prediction Point Sampling Interval)} & \textbf{Known Points} & \textbf{Prediction Points} & \textbf{CPU Prediction (\%)} & \textbf{GPU Prediction (\%)}  \\
+\midrule
+(19, 2) & 125 & 32768 & 36.7931 & 36.7932 \\
+(19, 1) & 125 & 110592 & 61.6812 & 61.6813\\
+(14, 2) & 343 & 32768 & 18.7056 & 18.7057\\
+(14, 1) & 343 & 110592 & 35.2600 & 35.2599\\
+(9, 2) & 1000 & 32768 & 14.0551 & 14.0556\\ 
+(9, 1) & 1000 & 110592 & 16.0798 & 16.0799\\ 
+(7, 2) & 1728 & 32768 & 11.1057 & 11.1052\\ 
+(7, 1) & 1728 & 110592 & 12.3438 & 12.3434   \\ 
+(4, 2) & 8000 & 32768 & 9.6401 & 9.6400  \\
+(4, 1) & 8000 & 110592 & 9.8266 & 9.8268  \\
+\bottomrule
+\end{tabular}}
+\label{tab:precision3} 
+\end{table*}
+
+\subsection{GPU Acceleration Performance Testing}
+The experimental setup of Experiment 2 for evaluating acceleration performance is exactly the same as in Experiment 1. 
+
+\subsubsection{Relationship between Acceleration Performance and Number of Known Points}
+\label{sectionA}
+Like the Experiment 1, The number of prediction points is set to 110,592. The GPU-kriging data block size is set from 10, 000 to 50, 000. A comparison of the time consumed by CPU and GPU predictions as the number of known point samples varies in Experiment 2 is show in Fig \ref{fig:TimeWithKnowPoints2} (Block Size: 50000) and Table \ref{tab:TimeWithTrainingPoints2}.
+
+As can be seen, the algorithm's speedup increases with the growth in the number of known points or when the number of partitions rises from 10,000 to 50,000. The results are consistent with those presented in Experiment 1 (Fig \ref{fig:TimeWithKnowPoints} and Table \ref{tab:TimeWithTrainingPoints}), indicating that the relationship between acceleration efficiency and the number of known points remains unaffected by changes in the radiation scenario.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\columnwidth]{TimeWithTraningPoints2.pdf}
+    \caption{\rmfamily Prediction Time with Number of Known Points When Block Size is 50000}
+    \label{fig:TimeWithKnowPoints2}
+\end{figure}
+
+\begin{table*}
+\caption{GPU and CPU Prediction Time and GPU Speedup for Different Numbers of Known Points when the Number of Prediction Points is 110,592}
+\resizebox{\textwidth}{!}{\begin{tabular}{cccccccccc}
+\toprule
+& \multicolumn{3}{c}{\textbf{Block Size: 50000}} & \multicolumn{3}{c}{\textbf{Block Size: 20000}} & \multicolumn{3}{c}{\textbf{Block Size: 10000}} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7} \cmidrule(lr){8-10}
+\textbf{\rmfamily Number of Known Points} & \textbf{\rmfamily GPU Time (s)} & \textbf{\rmfamily CPU Time (s)} & \textbf{\rmfamily Speedup} & \textbf{\rmfamily GPU Time (s)} & \textbf{\rmfamily CPU Time (s)} & \textbf{\rmfamily Speedup} & \textbf{\rmfamily GPU Time (s)} & \textbf{\rmfamily CPU Time (s)} & \textbf{\rmfamily Speedup} \\
+\midrule
+343 & 0.06 & 1.47 & 24.50 & 0.09 & 1.42 & 15.78 & 0.09 & 1.38 & 15.33 \\
+512 & 0.11 & 2.45 & 22.27 & 0.10 & 2.02 & 20.20 & 0.14 & 2.28 & 16.29 \\
+729 & 0.13 & 4.07 & 31.31 & 0.13 & 3.75 & 28.85 & 0.20 & 3.47 & 17.35 \\
+1000 & 0.17 & 5.71 & 33.59 & 0.18 & 4.67 & 25.94 & 0.24 & 4.75 & 19.79 \\
+1331 & 0.22 & 8.11 & 36.86 & 0.23 & 6.66 & 28.96 & 0.34 & 6.22 & 18.29 \\
+1728 & 0.30 & 12.10 & 40.33 & 0.34 & 11.30 & 33.24 & 0.56 & 9.72  & 17.36 \\
+2744 & 0.57 & 22.23 & 39.02 & 0.65 & 22.11 & 34.02 & 0.90 & 20.66 & 22.96 \\
+4096 & 1.14 & 87.50 & 76.75 & 1.48 & 52.53 & 46.15 & 2.16 & 45.12 & 20.89 \\
+\bottomrule
+\end{tabular}}
+\label{tab:TimeWithTrainingPoints2}
+\end{table*}
+
+\subsubsection{Relationship between Acceleration Performance and Number of Prediction Points}
+\label{sectionB}
+Like the Experiment 1, The prediction region is subdivided into a $475 \times 475 \times 475$ grid, with each grid cell measuring $1.2$ cm $\times 4$ cm $\times 1.6$ cm. The number of known points is set to 512. The GPU-kriging data block size is dynamically determined using the formula:
+
+$$min\left\{200000, \max\left\{\frac{\text{number of known points}}{10}, 20000\right\}\right\}$$
+
+A comparison of the time consumed by CPU and GPU predictions as the number of prediction point samples varies is shown in Table \ref{tab:TimeWithPredictPoints2}. As can be seen, as the number of prediction points increases from $2\time 10^5$ to $10^7$, the GPU speedup ratio increases from 10.36 to 88.20. The results are consistent with those in Experiment 1 (Table \ref{tab:TimeWithPredictPoints}), with only minor differences in the acceleration effect. This indicates that the relationship between acceleration efficiency and the number of prediction points remains unaffected by changes in the radiation scenario.
+
+\begin{table*}
+\caption{GPU and CPU Prediction Time and GPU Speedup for Different Numbers of Prediction Points when the Number of Known Points is 512}
+\resizebox{0.8\textwidth}{0.12\textwidth}{\begin{tabular}{ccccc}
+\toprule
+ \textbf{\rmfamily Number of prediction Points} & \textbf{\rmfamily CPU Prediction Time (s)} & \textbf{\rmfamily GPU Prediction Time (s)} & \textbf{\rmfamily Speedup} \\
+\midrule
+\rmfamily 140608 & \rmfamily 2.59 & \rmfamily 0.25 & \rmfamily 10.36 \\
+\rmfamily 205379 & \rmfamily 2.78 & \rmfamily 0.14 & \rmfamily 19.86 \\
+\rmfamily 238328 & \rmfamily 3.90 & \rmfamily 0.18 & \rmfamily 21.67 \\
+\rmfamily 389017 & \rmfamily 6.30 & \rmfamily 0.24 & \rmfamily 26.25 \\
+\rmfamily 512000 & \rmfamily 12.83 & \rmfamily 0.33 & \rmfamily 38.88 \\
+\rmfamily 857375 & \rmfamily 57.53 & \rmfamily 0.50 & \rmfamily 115.06 \\
+\rmfamily 1771561 & \rmfamily 74.00 & \rmfamily 0.95 & \rmfamily 77.89 \\
+\rmfamily 4019679 & \rmfamily 203.01 & \rmfamily 2.26 & \rmfamily 89.83 \\
+\rmfamily 13481272 & \rmfamily 672.98 & \rmfamily 7.63 & \rmfamily 88.20 \\
+\bottomrule
+\end{tabular}}
+\label{tab:TimeWithPredictPoints2}
+\end{table*}
+
+\subsubsection{Relationship between Acceleration Performance and Data Block Size}
+Similar to Experiment 1, two sets of sub-experiments are conducted in Experiment 2:
+
+(1) The first set of sub-experiments fixes the number of known points at 512 and varies the number of prediction points across [314,432, 512,000, 884,736, 1,685,159]. Block sizes are ranged from 5,000 to 500,000 to evaluate the influence of block size on GPU prediction time for different prediction point counts and to identify the optimal block size for each scenario. The results are shown in Fig \ref{fig:Block3}.
+
+(2) The second set of sub-experiments maintains a fixed number of prediction points at 857,375 while varying the number of known points across [216, 343, 512, 729]. Block sizes are again varied from 5,000 to 500,000 to assess the influence of block size on GPU prediction time for different known point counts and to determine the optimal block size for each scenario. The results are shown in Fig \ref{fig:Block4}.
+
+
+As shown in Fig \ref{fig:Block3}, when the number of known points is fixed at 512, the GPU-krige prediction time initially decreases and then increases as the data block size decreases. This pattern is consistent with the trends observed in Experiment 1. Additionally, the rate of change in prediction time with respect to block size increases as the number of prediction points grows, mirroring the behavior in Experiment 1.
+Similarly, Fig \ref{fig:Block4} shows that when the number of prediction points is fixed at 857,375, the GPU-krige prediction time first decreases and then increases as the block size decreases. The rate of change in prediction time also increases as the number of known points grows, again reflecting the trends observed in Experiment 1.
+
+Furthermore, Fig \ref{fig:Block3} and Fig \ref{fig:Block4} reveal that when the number of known points and prediction points is relatively small, the optimal data block size value is unstable. However, as the data volume increases, the optimal block size consistently falls within the range of 60,000 to 90,000, which aligns with the findings of Experiment 1.
+\begin{figure}[htbp]
+    \centering
+    \begin{subfigure}[b]{0.5\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{TimeWithTestingAndBlocks2.pdf}
+        \caption{Influence of Block Size on GPU Prediction Time for Varying Prediction Point Counts}
+        \label{fig:Block3}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.5\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{TimeWithTrainingAndBlocks2.pdf}
+        \caption{Influence of Block Size on GPU Prediction Time for Varying Known Point Counts}
+        \label{fig:Block4}
+    \end{subfigure}
+
+    \caption{\rmfamily Influence of Block Size on GPU Prediction Time}
+    \label{fig:main}
+\end{figure}
+
+\subsubsection{Relationship between Acceleration Performance and  computational power of the GPU}
+In this section, we explore the correlation between acceleration performance and the computational power of GPUs. We conducted a sub-experiment to compare the performance of our improved Kriging algorithm on different GPU models, specifically the RTX 4090 and the RTX 2080Ti. The RTX 4090 features 16,384 CUDA cores and 24 GB of GDDR6X memory, while the RTX 2080Ti has 4,352 CUDA cores and 11 GB of GDDR6X memory. The specific settings for known points, prediction points, and block size are the same as those in Section \ref{sectionA} (Block Size: 50000). The results of the experimental comparison are shown in Table \ref{tab:GPUAccelerationEffect}. 
+
+It can be observed that the acceleration effect of the improved Kriging algorithm on the RTX 4090 is significantly stronger than on the RTX 2080Ti. In other words, as the computational power of the GPU increases, the acceleration effect of the algorithm also improves. This indicates that the enhanced algorithm’s acceleration capability can continue to evolve with advances in GPU technology.
+
+\begin{table*}
+\caption{Impact of GPU Models on Algorithm Acceleration: Comparison of RTX 2080Ti and RTX 4090 Performance with Different Numbers of Known Points (Prediction Points = 110,592; Block Size = 50000)}
+\resizebox{0.8\textwidth}{!}{\begin{tabular}{ccccccc}
+\toprule
+& \multicolumn{3}{c}{\textbf{\rmfamily RTX 2080Ti}} & \multicolumn{3}{c}{\textbf{\rmfamily RTX 4090}}  \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7} 
+\textbf{\rmfamily Number of Known Points} & \textbf{\rmfamily CPU Time (s)} & \textbf{\rmfamily GPU Time (s)} & \textbf{\rmfamily GPU Speedup} & \textbf{\rmfamily CPU Time (s)} & \textbf{\rmfamily GPU Time (s)} & \textbf{\rmfamily GPU Speedup} \\
+\midrule
+343 & 1.47 & 0.06 & 24.50 & 1.47 & 0.05 & 29.40  \\
+512 & 2.45 & 0.11 & 22.27 & 2.45 & 0.05 & 49.00  \\
+729 & 4.07 & 0.13 & 31.31 & 4.07 & 0.08 & 50.88  \\
+1000 & 5.71 & 0.17 & 33.59 & 5.71 & 0.11 & 51.91  \\
+1331 & 8.11 & 0.22 & 36.86 & 8.11 & 0.16 & 50.69  \\
+1728 & 12.10 & 0.30 & 40.33 & 12.10 & 0.21 & 57.62  \\
+2744 & 22.23 & 0.57 & 39.02 & 22.23 & 0.41 & 54.22  \\
+4096 & 87.50 & 1.14 & 76.75 & 87.50 & 0.78 & 112.18  \\
+\bottomrule
+\end{tabular}}
+\label{tab:GPUAccelerationEffect}
+\end{table*}
+
+\section{Conclusion}
+This study investigates the implementation of a GPU-accelerated Kriging algorithm enhanced with a data block strategy. The algorithm's performance is validated using Monte Carlo simulation data. The results demonstrate that:
+
+(1) the accuracy of the improved Kriging algorithm closely aligns with that of the original Kriging algorithm.
+
+(2) The acceleration ratio achieved by the improved algorithm increases proportionally to both the number of known points and the number of prediction points.
+
+(3) The GPU acceleration effect demonstrates a trend of initial increase followed by a decrease as the data block size increases.
+
+(4) The algorithm is less accurate in complex scenario. With a single source and no obstacles, it achieved 96.65\% accuracy using 2,744 sample points. With multiple sources and obstacles, accuracy dropped to 91.17\%, even when using 8,000 sample points.
+
+(5) The algorithm's speed remained largely unaffected by the added complexity.
+
+The results presented in this study highlight the effectiveness of the GPU-accelerated Kriging algorithm enhanced with a data block strategy in addressing the time-consuming problem of refined and real-time radiation field reconstruction.
+
+
+\vspace*{-1em}
+\printcredits
+
+\vspace*{1em}
+\noindent{\large \bf{Declaration of generative AI and AI-assisted technologies in the writing process}}
+
+During the preparation of this work, Ningbiao Xiao used Chatgpt for translation. After using this tool/service, Ningbiao Xiao reviewed and edited the content as needed and takes full responsibility for the content of the publication.
+
+% \enlargethispage{-6.5cm} %(填充当前页栏高度)调整最后页面对齐
+
+% \enlargethispage{-5cm} %(填充当前页栏高度)调整最后页面对齐
+
+\bibliographystyle{cas-model2-names}
+\bibliography{cas-refs}
+% \enlargethispage{-5cm} %(填充当前页栏高度)调整最后页面对齐
+
+\end{document}
