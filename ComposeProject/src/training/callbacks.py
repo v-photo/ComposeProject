@@ -19,6 +19,7 @@ class EarlyCycleStopper(dde.callbacks.Callback):
         self.best_mre = np.inf
         self.should_stop = False
         self.best_model_path = "" # 将存储最佳模型的完整真实路径
+        self.events = []  # 记录早停/回退事件 (epoch, type)
 
     def reset_cycle(self, initial_mre: float = np.inf, initial_model_path: str = ""):
         """
@@ -32,6 +33,7 @@ class EarlyCycleStopper(dde.callbacks.Callback):
         self.best_mre = initial_mre
         self.best_model_path = initial_model_path
         self.should_stop = False
+        self.events = []
 
     def on_epoch_end(self):
         """在每个 epoch 结束时被调用, 并且在这里检查性能"""
@@ -52,6 +54,7 @@ class EarlyCycleStopper(dde.callbacks.Callback):
                 if improvement > required_improvement_amount:
                     print(f"    💡 Early Stop: MRE dropped from {self.best_mre:.6f} to {latest_mre:.6f} (>{self.threshold:.0%}).")
                     self.should_stop = True
+                    self.events.append((self.model.train_state.step, 'early_stop'))
             
             # 判断当前模型是否是新的周期内最佳模型
             if latest_mre < self.best_mre:

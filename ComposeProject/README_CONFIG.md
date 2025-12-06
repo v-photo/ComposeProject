@@ -16,26 +16,37 @@ python main.py --method kriging
 # 强制使用PINN方法  
 python main.py --method pinn
 
+# 使用 Compose（PINN + GPU-Kriging 引导）
+python main.py --method compose
+
+# 运行自适应完整实验（周期训练+数据注入+Kriging）
+python main.py --method adaptive_experiment
+
 # 智能选择方法（默认）
 python main.py --method auto
 ```
 
-## ⚙️ 预测方法选择
-
-系统支持三种预测方法选择模式：
-
-| 参数 | 说明 | 适用场景 |
-|------|------|----------|
-| `--method auto` | 🤖 **智能选择**（默认）| 系统自动分析数据分布，选择最适合的方法 |
-| `--method kriging` | ⚙️ **强制Kriging** | 数据分布均匀，需要空间插值 |
-| `--method pinn` | 🧠 **强制PINN** | 数据稀疏或分布不均，需要物理约束 |
+## ⚙️ 预测方法选择（配置示例）
+```python
+@dataclass
+class SystemConfig:
+    method: str = "auto"                 # auto/kriging/pinn/compose/adaptive_experiment
+    enable_compose_adaptive: bool = False
+    enable_pinn_adaptive: bool = False
+    enable_data_injection: bool = False  # 仅 compose/pinn 使用；adaptive_experiment 独立配置
+```
+用途速览：
+- auto：自动选择 Kriging 或 PINN
+- kriging：纯 Kriging 插值
+- pinn：纯 PINN（可选随机自适应加密）
+- compose：两阶段 PINN + Kriging 残差引导
+- adaptive_experiment：多周期 + 数据注入 + Kriging 重采样 + 基线对比
 
 ### 智能选择规则
 - **数据分布均匀** + **样本充足** → 自动选择 Kriging
 - **数据聚集** 或 **样本稀少** → 自动选择 PINN
 
 ## 📋 配置预设
-
 使用 `--preset` 参数选择预设配置：
 
 ### 1. `quick_test` - 快速测试
@@ -55,6 +66,7 @@ python main.py --preset full_adaptive
 - ⏱️ **训练时间**: ~30-60秒
 - 📊 **数据规模**: 200个训练样本，500个测试样本
 - 🧠 **PINN训练**: 8000轮，包含克里金重采样和数据注入
+> 若要使用新增自适应实验，请配合 `--method adaptive_experiment`（或在 preset 中将 `system.method` 设为 `adaptive_experiment`），并在 `config.py -> adaptive_experiment` 调整周期、探索率、注入/Kriging 开关等。
 
 ### 3. `kriging_only` - 仅克里金重采样
 ```bash
@@ -74,50 +86,55 @@ python main.py --preset baseline
 - 📊 **数据规模**: 100个训练样本，200个测试样本
 - 🧠 **PINN训练**: 4000轮，固定损失权重
 
-## 🔧 自定义配置
+> 说明：各预设已在 `config.py` 的 `system.method` 设置默认方法（如 kriging_only→kriging，pinn_only→pinn，default/quick_test/random_sampling→auto）。未指定 `--method` 时采用预设默认，CLI 指定则覆盖。
 
-### 修改 config.py
-
-打开 `config.py` 文件，可以自定义以下配置：
-
-#### 实验配置 (ExperimentConfig)
+## 🔧 自定义配置（示例结构）
 ```python
 @dataclass
-class ExperimentConfig:
-    experiment_name: str = "my_experiment"      # 实验名称
-    enable_kriging_resampling: bool = True      # 启用克里金重采样
-    enable_data_injection: bool = False         # 启用数据注入
-    enable_rapid_improvement_early_stop: bool = False  # 启用快速改善早停
-```
-
-#### 数据配置 (DataConfig)
-```python
-@dataclass  
 class DataConfig:
-    num_samples: int = 100                      # 训练样本数量
-    test_set_size: int = 200                    # 测试集大小
-    space_dims: List[float] = [20.0, 10.0, 10.0]  # 物理空间尺寸 [x,y,z] (米)
-```
+    num_samples: int = 300
+    test_set_size: int = 300
+    space_dims: List[float] = field(default_factory=lambda:[20.0,10.0,10.0])
 
-#### PINN配置 (PINNConfig)
-```python
 @dataclass
-class PINNConfig:
-    total_epochs: int = 4000                    # 总训练轮数
-    network_layers: List[int] = [3, 64, 64, 64, 1]  # 网络结构
-    num_collocation_points: int = 4096          # 配置点数量
-    initial_loss_ratio: float = 10.0           # 初始损失权重比值
-    final_loss_ratio: float = 0.1              # 最终损失权重比值
-```
+class PinnConfig:
+    network_layers: List[int] = field(default_factory=lambda:[3,64,64,64,1])
+    num_collocation_points: int = 4096
+    learning_rate: float = 1e-3
+    loss_ratio: float = 10.0
+    total_epochs: int = 5000
+    detect_every: int = 500
+    adaptive_cycle_epochs: int = 2000
+    detection_threshold: float = 0.1
 
-#### 克里金配置 (KrigingConfig)
-```python
 @dataclass
 class KrigingConfig:
-    variogram_model: str = "exponential"        # 变异函数模型
-    initial_exploration_ratio: float = 0.50    # 初始探索率
-    final_exploration_ratio: float = 0.18      # 最终探索率
-    exploration_decay_rate: float = 0.03       # 探索率衰减
+    variogram_model: str = "exponential"
+    nlags: int = 8
+    block_size: int = 10000
+    exploration_ratio: float = 0.2        # compose 模式使用
+    total_candidates: int = 50000         # compose 模式使用
+    style: str = "gpu_b"
+    multi_process: bool = False
+    print_time: bool = False
+    torch_ac: bool = False
+
+@dataclass
+class AdaptiveExperimentConfig:
+    total_epochs: int = 1000
+    adaptive_cycle_epochs: int = 200
+    detect_every: int = 100
+    num_residual_scout_points: int = 5000
+    exploration_initial: float = 0.2
+    exploration_final: float = 0.05
+    exploration_decay: float = 0.02
+    enable_kriging: bool = True
+    enable_data_injection: bool = False
+    enable_rapid_improvement_early_stop: bool = True
+    split_ratios: list = field(default_factory=lambda:[0.7,0.05,0.05,0.05,0.05,0.05,0.05])
+    test_set_size: int = 300
+    enable_baseline: bool = True
+    file_suffix: str = "full_adaptive"
 ```
 
 ## 📊 输出结果
@@ -130,6 +147,7 @@ class KrigingConfig:
 ### 保存文件
 - `results/predictions_<experiment_name>.npy`: 预测结果
 - `results/training_history_<experiment_name>.npz`: 训练历史（如果使用PINN）
+
 
 ## 🛠️ 常见问题
 
