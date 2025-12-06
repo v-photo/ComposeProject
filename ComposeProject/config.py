@@ -19,6 +19,22 @@ DEFAULT_CONFIG = {
         "num_samples": 300,
         "downsample_factor": 1, # 1表示不降采样
     },
+    # 采样配置（新增）
+    "sampling": {
+        "strategy": "kriging_style",  # 可选: "kriging_style", "positive_only", "uniform", "high_dose"
+        # Kriging风格采样参数
+        "kriging_style": {
+            "box_origin": [5, 5, 5],      # 采样区域起点 [x, y, z] (网格索引)
+            "box_extent": [126, 126, 62], # 采样区域延伸长度 [x_len, y_len, z_len]
+            "step_sizes": [5],            # 采样步长列表
+            "source_positions": [],       # 源点位置列表，用于排除
+            "source_exclusion_radius": 30.0,  # 源点排除半径
+        },
+        # 随机采样参数（当strategy不是kriging_style时使用）
+        "random_sampling": {
+            "num_samples": 300,
+        }
+    },
     "pinn": {
         "model_params": {
             "network_layers": [3, 64, 64, 64, 1],
@@ -60,6 +76,17 @@ PRESETS = {
     "quick_test": {
         **DEFAULT_CONFIG,
         "experiment": {"name": "quick_test"},
+        "sampling": {
+            "strategy": "kriging_style",
+            "kriging_style": {
+                "box_origin": [5, 5, 5],
+                "box_extent": [60, 60, 30],  # 较小区域用于快速测试
+                "step_sizes": [10],          # 较大步长
+                "source_positions": [],
+                "source_exclusion_radius": 30.0,
+            },
+            "random_sampling": {"num_samples": 50}
+        },
         "pinn": {
             **DEFAULT_CONFIG["pinn"],
             "model_params": {
@@ -75,12 +102,22 @@ PRESETS = {
         "data": {
             **DEFAULT_CONFIG["data"],
             "num_samples": 50,
-            "test_set_size": 100,
         }
     },
     "kriging_only": {
         **DEFAULT_CONFIG,
         "experiment": {"name": "kriging_only_test"},
+        "sampling": {
+            "strategy": "kriging_style",
+            "kriging_style": {
+                "box_origin": [5, 5, 5],
+                "box_extent": [126, 126, 62],
+                "step_sizes": [5],
+                "source_positions": [],
+                "source_exclusion_radius": 30.0,
+            },
+            "random_sampling": {"num_samples": 300}
+        },
         "selection": {
             "min_points_for_kriging": 1,
             "uniformity_cv_threshold": 999.0, # 强制选择Kriging
@@ -89,9 +126,30 @@ PRESETS = {
     "pinn_only": {
         **DEFAULT_CONFIG,
         "experiment": {"name": "pinn_only_test"},
+        "sampling": {
+            "strategy": "kriging_style",
+            "kriging_style": {
+                "box_origin": [5, 5, 5],
+                "box_extent": [126, 126, 62],
+                "step_sizes": [5],
+                "source_positions": [],
+                "source_exclusion_radius": 30.0,
+            },
+            "random_sampling": {"num_samples": 300}
+        },
         "selection": {
             "min_points_for_kriging": 99999, # 强制选择PINN
             "uniformity_cv_threshold": 0.0,
+        }
+    },
+    # 新增：使用随机采样的预设（保持向后兼容）
+    "random_sampling": {
+        **DEFAULT_CONFIG,
+        "experiment": {"name": "random_sampling_test"},
+        "sampling": {
+            "strategy": "positive_only",
+            "kriging_style": DEFAULT_CONFIG.get("sampling", {}).get("kriging_style", {}),
+            "random_sampling": {"num_samples": 300}
         }
     }
 }
@@ -110,4 +168,4 @@ def load_config_dict(preset_name: str = "default") -> Dict[str, Any]:
         raise ValueError(f"Unknown preset '{preset_name}'. Available presets: {list(PRESETS.keys())}")
     
     print(f"  ✅ Configuration loaded for preset: '{preset_name}'")
-    return PRESETS[preset_name] 
+    return PRESETS[preset_name]

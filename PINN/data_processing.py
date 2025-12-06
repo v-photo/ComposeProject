@@ -507,3 +507,124 @@ class DataLoader:
         print(f"Dose range in samples: {np.min(sampled_doses_values):.2e} to {np.max(sampled_doses_values):.2e}")
         
         return sampled_points_xyz, sampled_doses_values, sampled_log_doses_values 
+    @staticmethod
+    def sample_kriging_style(dose_data, 
+                            box_origin=[5, 5, 5],
+                            box_extent=[90, 90, 90],
+                            step_sizes=[5],
+                            source_positions=None,
+                            source_exclusion_radius=30.0,
+                            direction="3vector"):
+        """
+        使用Kriging风格的结构化网格采样（与 Kriging/dataAnalysis.py 的 training_sampling 一致）
+        
+        Args:
+            dose_data: Dict from load_dose_* functions
+            box_origin: 采样区域起点 [x, y, z]
+            box_extent: 采样区域在各方向的延伸长度 [x_len, y_len, z_len]
+            step_sizes: 采样步长列表
+            source_positions: 源点位置列表，用于排除源点附近区域
+            source_exclusion_radius: 源点排除半径
+            direction: "3vector" 只采样正方向, "6vector" 正负方向都采样
+            
+        Returns:
+            tuple: (sampled_points_xyz, sampled_doses_values, sampled_log_doses_values)
+        """
+        dose_grid = dose_data['dose_grid']
+        world_min = dose_data['world_min']
+        voxel_size = dose_data['voxel_size']
+        grid_shape = np.array(dose_grid.shape)
+        
+        if source_positions is None:
+            source_positions = []
+        
+        sampled_data = []
+        
+        for step in step_sizes:
+            x_range = box_extent[0] // step
+            y_range = box_extent[1] // step
+            z_range = box_extent[2] // step
+            
+            for xi in range(0, x_range + 1):
+                for yi in range(0, y_range + 1):
+                    for zi in range(0, z_range + 1):
+                        x_coord = box_origin[0] + xi * step
+                        y_coord = box_origin[1] + yi * step
+                        z_coord = box_origin[2] + zi * step
+                        
+                        # 边界检查
+                        if (x_coord >= grid_shape[0] or y_coord >= grid_shape[1] or 
+                            z_coord >= grid_shape[2] or x_coord < 0 or y_coord < 0 or z_coord < 0):
+                            continue
+                        
+                        # 检查是否需要排除源点附近
+                        skip = False
+                        for pos in source_positions:
+                            distance = np.sqrt((x_coord - pos[0])**2 + 
+                                             (y_coord - pos[1])**2 + 
+                                             (z_coord - pos[2])**2)
+                            if distance <= source_exclusion_radius:
+                                skip = True
+                                break
+                        
+                        if skip:
+                            continue
+                        
+                        value = dose_grid[x_coord, y_coord, z_coord]
+                        if value > EPSILON:  # 只采样正剂量点
+                            sampled_data.append((x_coord, y_coord, z_coord, value))
+        
+        if len(sampled_data) == 0:
+            raise ValueError("Kriging风格采样未能获取到任何有效点，请检查参数设置")
+        
+        # 去重
+        sampled_data = list(set(sampled_data))
+        sampled_data = np.array(sampled_data)
+        
+        sampled_indices = sampled_data[:, :3].astype(int)
+        sampled_doses_values = sampled_data[:, 3]
+        
+        # 转换为物理坐标
+        sampled_points_xyz = world_min + sampled_indices * voxel_size + voxel_size / 2.0
+        sampled_log_doses_values = np.log(sampled_doses_values + EPSILON)
+        
+        print(f"Kriging风格采样完成: {len(sampled_points_xyz)} 个训练点")
+        print(f"采样区域: origin={box_origin}, extent={box_extent}, steps={step_sizes}")
+        print(f"剂量范围: {np.min(sampled_doses_values):.2e} to {np.max(sampled_doses_values):.2e}")
+        
+        return sampled_points_xyz, sampled_doses_values, sampled_log_doses_values
+    
+    @staticmethod
+    def sample_with_config(dose_data, sampling_config):
+        """
+        使用配置字典进行采样的便捷方法
+        
+        Args:
+            dose_data: Dict from load_dose_* functions
+            sampling_config: 采样配置字典，包含以下键:
+                - strategy: 'kriging_style', 'positive_only', 'uniform', etc.
+                - 其他策略特定的参数
+                
+        Returns:
+            tuple: (sampled_points_xyz, sampled_doses_values, sampled_log_doses_values)
+        """
+        strategy = sampling_config.get('strategy', 'positive_only')
+        
+        if strategy == 'kriging_style':
+            return DataLoader.sample_kriging_style(
+                dose_data,
+                box_origin=sampling_config.get('box_origin', [5, 5, 5]),
+                box_extent=sampling_config.get('box_extent', [90, 90, 90]),
+                step_sizes=sampling_config.get('step_sizes', [5]),
+                source_positions=sampling_config.get('source_positions', None),
+                source_exclusion_radius=sampling_config.get('source_exclusion_radius', 30.0),
+                direction=sampling_config.get('direction', '3vector')
+            )
+        else:
+            return DataLoader.sample_training_points(
+                dose_data,
+                num_samples=sampling_config.get('num_samples', 300),
+                sampling_strategy=strategy,
+                **{k: v for k, v in sampling_config.items() 
+                   if k not in ['strategy', 'num_samples']}
+            )

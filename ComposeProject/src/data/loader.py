@@ -403,3 +403,103 @@ def create_prediction_grid(dose_data: Dict, downsample_factor: int = 1) -> np.nd
     prediction_points = np.vstack([XX.ravel(), YY.ravel(), ZZ.ravel()]).T
     
     return prediction_points
+
+
+# ==================== Kriging 风格采样扩展 ====================
+
+def sample_kriging_style(
+    dose_data: Dict,
+    box_origin: List[int] = [5, 5, 5],
+    box_extent: List[int] = [90, 90, 90],
+    step_sizes: List[int] = [5],
+    source_positions: List[List[int]] = None,
+    source_exclusion_radius: float = 30.0,
+    return_dataframe: bool = False
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    使用Kriging风格的结构化网格采样（与 Kriging/dataAnalysis.py 的 training_sampling 一致）
+    
+    此函数是对 unified_sampling.py 的简化封装，提供与 sample_training_points 一致的接口。
+    
+    Args:
+        dose_data: PINN格式的数据字典
+        box_origin: 采样区域起点 [x, y, z] (网格索引)
+        box_extent: 采样区域在各方向的延伸长度 [x_len, y_len, z_len]
+        step_sizes: 采样步长列表
+        source_positions: 源点位置列表，用于排除源点附近区域
+        source_exclusion_radius: 源点排除半径
+        return_dataframe: 是否同时返回DataFrame
+        
+    Returns:
+        (train_points, train_values) 或 (train_points, train_values, df) 如果 return_dataframe=True
+    """
+    dose_grid = dose_data['dose_grid']
+    world_min = dose_data.get('world_min', np.zeros(3))
+    voxel_size = dose_data.get('voxel_size', np.ones(3))
+    grid_shape = np.array(dose_grid.shape)
+    
+    if source_positions is None:
+        source_positions = []
+    
+    sampled_data = []
+    
+    for step in step_sizes:
+        x_range = box_extent[0] // step
+        y_range = box_extent[1] // step
+        z_range = box_extent[2] // step
+        
+        for xi in range(0, x_range + 1):
+            for yi in range(0, y_range + 1):
+                for zi in range(0, z_range + 1):
+                    x_coord = box_origin[0] + xi * step
+                    y_coord = box_origin[1] + yi * step
+                    z_coord = box_origin[2] + zi * step
+                    
+                    # 边界检查
+                    if (x_coord >= grid_shape[0] or y_coord >= grid_shape[1] or 
+                        z_coord >= grid_shape[2] or x_coord < 0 or y_coord < 0 or z_coord < 0):
+                        continue
+                    
+                    # 检查是否需要排除源点附近
+                    skip = False
+                    for pos in source_positions:
+                        distance = np.sqrt((x_coord - pos[0])**2 + 
+                                         (y_coord - pos[1])**2 + 
+                                         (z_coord - pos[2])**2)
+                        if distance <= source_exclusion_radius:
+                            skip = True
+                            break
+                    
+                    if skip:
+                        continue
+                    
+                    value = dose_grid[x_coord, y_coord, z_coord]
+                    if value > 1e-10:  # 只采样正剂量点
+                        sampled_data.append((x_coord, y_coord, z_coord, value))
+    
+    if len(sampled_data) == 0:
+        raise ValueError("Kriging风格采样未能获取到任何有效点，请检查参数设置")
+    
+    # 去重
+    sampled_data = list(set(sampled_data))
+    sampled_data = np.array(sampled_data)
+    
+    sampled_indices = sampled_data[:, :3].astype(int)
+    sampled_values = sampled_data[:, 3]
+    
+    # 转换为物理坐标
+    train_points = world_min + sampled_indices * voxel_size + voxel_size / 2.0
+    train_values = sampled_values.reshape(-1, 1)
+    
+    print(f"Kriging风格采样完成: {len(train_points)} 个训练点")
+    
+    if return_dataframe:
+        df = pd.DataFrame({
+            'x': sampled_indices[:, 0],
+            'y': sampled_indices[:, 1],
+            'z': sampled_indices[:, 2],
+            'target': sampled_values
+        })
+        return train_points, train_values, df
+    
+    return train_points, train_values
