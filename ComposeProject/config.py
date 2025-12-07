@@ -12,22 +12,22 @@ DEFAULT_CONFIG = {
     # 自适应实验配置（新增）
     "adaptive_experiment": {
         # 训练循环
-        "total_epochs": 1000,
+        "total_epochs": 2000,
         "adaptive_cycle_epochs": 200,       # 每个自适应周期的最大训练轮数
         "detect_every": 100,                # 早停检测间隔
         "num_residual_scout_points": 5000,  # 残差侦察点数
         "exploration": {                    # 探索率递减策略
-            "initial": 0.2,
-            "final": 0.05,
-            "decay": 0.02
+            "initial": 0.5,
+            "final": 0.018,
+            "decay": 0.04,
         },
         # 开关
-        "enable_kriging": True,
-        "enable_data_injection": False,
+        "enable_kriging": False,
+        "enable_data_injection": True,
         "enable_rapid_improvement_early_stop": True,
         # 数据拆分
-        "split_ratios": [0.7, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05],  # 主集 + 多储备
-        "test_set_size": 300,
+        "split_ratios": [0.7] + [0.05]*6,  # 主集 + 多储备
+        "test_set_size": 30000,
         # 基线对比
         "enable_baseline": True,
         # 输出文件名后缀
@@ -40,7 +40,7 @@ DEFAULT_CONFIG = {
         "z_size": 72,
         "y_size": 136,
         "space_dims": [20.0, 10.0, 10.0], # 物理空间维度 (x,y,z)
-        "num_samples": 50, #修改取样点数
+        "num_samples": 200, #修改取样点数
         "downsample_factor": 1, # 1表示不降采样
     },
     # 采样配置（新增）
@@ -208,8 +208,40 @@ PRESETS = {
             **DEFAULT_CONFIG["system"],
             "method": "auto"
         }
+    },
+    # 对齐老版 example2.py 的仅数据注入配置（禁用 Kriging），用于复现旧版对比图
+    "data_injection_only_v1": {
+        **DEFAULT_CONFIG,
+        "experiment": {"name": "data_injection_only_v1"},
+        "adaptive_experiment": {
+            **DEFAULT_CONFIG["adaptive_experiment"],
+            "enable_kriging": False,
+            "enable_data_injection": True,
+            "enable_rapid_improvement_early_stop": True,
+            "file_suffix": "data_injection_only",
+            "total_epochs": 4000,
+            "adaptive_cycle_epochs": 400,
+            "detect_every": 100,
+            "num_residual_scout_points": 5000,
+            "split_ratios": [0.7] + [0.05] * 6,
+            "test_set_size": 300,
+        },
+        "data": {
+            **DEFAULT_CONFIG["data"],
+            "num_samples": 50,
+        },
+        "sampling": {
+            "strategy": "positive_only",
+            "kriging_style": DEFAULT_CONFIG.get("sampling", {}).get("kriging_style", {}),
+            "random_sampling": {"num_samples": 50},
+        },
+        "system": {
+            **DEFAULT_CONFIG["system"],
+            "method": "adaptive_experiment",
+        },
     }
 }
+
 
 def load_config_dict(preset_name: str = "default") -> Dict[str, Any]:
     """

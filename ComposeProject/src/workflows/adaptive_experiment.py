@@ -1,4 +1,5 @@
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
 
@@ -16,6 +17,54 @@ from src.utils.environment import validate_compose_environment
 def _compute_exploration_ratio(cycle_number: int, initial: float, final: float, decay: float) -> float:
     """按周期递减的探索率计算。"""
     return max(final, initial - (cycle_number - 1) * decay)
+
+
+def _format_float(value: float, precision: int = 4) -> str:
+    """安全格式化浮点数，便于表格展示。"""
+    if value is None:
+        return "N/A"
+    return f"{value:.{precision}f}"
+
+
+def _write_comparison_markdown(
+    md_path: Path,
+    exp_name: str,
+    suffix: str,
+    adaptive_stats: Dict[str, Any],
+    baseline_stats: Dict[str, Any],
+):
+    """将耗时与精度的对比结果落盘为 Markdown。"""
+    md_path.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    rows = [
+        ("自适应PINN", adaptive_stats),
+        ("基线PINN", baseline_stats),
+    ]
+
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(f"# PINN 对比汇总（{exp_name}）\n\n")
+        f.write(f"- 生成时间：{timestamp}\n")
+        f.write(f"- 配置后缀：{suffix}\n\n")
+        f.write("| 模型 | 最终MRE | 最佳MRE | 训练轮数 | 耗时(秒) | 耗时(分钟) |\n")
+        f.write("| --- | --- | --- | --- | --- | --- |\n")
+        for name, stats in rows:
+            if not stats:
+                final_mre = best_mre = epochs = time_sec = time_min = "N/A"
+            else:
+                final_mre = _format_float(stats.get("final_mre"), 6)
+                best_mre = _format_float(stats.get("best_mre"), 6)
+                epochs_val = stats.get("epochs")
+                epochs = epochs_val if epochs_val is not None else "N/A"
+                time_sec_val = stats.get("time_seconds")
+                time_sec = _format_float(time_sec_val, 2)
+                time_min = _format_float(
+                    time_sec_val / 60 if isinstance(time_sec_val, (int, float)) else None,
+                    2,
+                )
+            f.write(f"| {name} | {final_mre} | {best_mre} | {epochs} | {time_sec} | {time_min} |\n")
+
+        f.write("\n> 说明：耗时统计覆盖模型初始化后的主要训练过程。\n")
 
 
 def run_adaptive_experiment(config: Dict[str, Any]):
@@ -118,7 +167,7 @@ def run_adaptive_experiment(config: Dict[str, Any]):
     history_epochs = []
     history_mre = []
 
-    start_time = time.time()
+    adaptive_start_time = time.time()
     while total_epochs_trained < total_epochs:
         remaining_total = total_epochs - total_epochs_trained
         cycle_max = min(cycle_epochs, remaining_total)
@@ -195,13 +244,23 @@ def run_adaptive_experiment(config: Dict[str, Any]):
         else:
             print("PHASE: Kriging 自适应采样已禁用，保持现有配置点。")
 
-    total_time = time.time() - start_time
-    print(f"\n--- ✅ 自适应训练完成，耗时 {total_time/60:.2f} 分 ---")
+    adaptive_time = time.time() - adaptive_start_time
+    print(f"\n--- ✅ 自适应训练完成，耗时 {adaptive_time/60:.2f} 分 ---")
+
+    adaptive_summary = {
+        "final_mre": history_mre[-1] if history_mre else None,
+        "best_mre": float(np.min(history_mre)) if history_mre else None,
+        "epochs": total_epochs_trained,
+        "time_seconds": adaptive_time,
+    }
 
     # 基线对比
     baseline_history = None
+    baseline_summary = None
+    baseline_time = None
     if enable_baseline:
         print("\n--- 🚀 训练基线 PINN (固定采样) ---")
+        baseline_start_time = time.time()
         adaptive_training_points = pinn.data.bcs[0].points
         adaptive_training_values = np.exp(pinn.data.bcs[0].values.cpu().numpy())
         full_training_data = np.hstack([adaptive_training_points, adaptive_training_values])
@@ -231,6 +290,14 @@ def run_adaptive_experiment(config: Dict[str, Any]):
                 "metrics": baseline.mre_history,
             }
         }
+        baseline_time = time.time() - baseline_start_time
+        baseline_summary = {
+            "final_mre": baseline.mre_history[-1] if baseline.mre_history else None,
+            "best_mre": float(np.min(baseline.mre_history)) if baseline.mre_history else None,
+            "epochs": baseline.model.train_state.step or 0,
+            "time_seconds": baseline_time,
+        }
+        print(f"--- ✅ 基线 PINN 训练完成，耗时 {baseline_time/60:.2f} 分 ---")
 
     # 汇总历史并绘图
     history = {
@@ -272,6 +339,15 @@ def run_adaptive_experiment(config: Dict[str, Any]):
         suffix=suffix,
         save_png=png_path,
         save_pdf=pdf_path,
+    )
+
+    md_path = results_dir / f"pinn_comparison_{suffix}.md"
+    _write_comparison_markdown(
+        md_path=md_path,
+        exp_name=exp_name,
+        suffix=suffix,
+        adaptive_stats=adaptive_summary,
+        baseline_stats=baseline_summary,
     )
 
     np.savez(
@@ -368,4 +444,3 @@ def _plot_v1_style(
     plt.savefig(save_png, dpi=300, bbox_inches="tight")
     plt.savefig(save_pdf, bbox_inches="tight")
     plt.close(fig)
-
