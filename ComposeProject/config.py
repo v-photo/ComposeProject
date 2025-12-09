@@ -58,7 +58,7 @@ DEFAULT_CONFIG = {
         },
         # 随机采样参数（当strategy不是kriging_style时使用）
         "random_sampling": {
-            "num_samples": 300,
+            "num_samples": 50,
         }
     },
     "pinn": {
@@ -106,7 +106,7 @@ DEFAULT_CONFIG = {
         "checkpoint_path": "./models/pinn_checkpoint", # 检查点路径前缀
         "results_dir": "results",                  # 结果输出目录
         "method": "auto",                          # 默认方法，可被CLI覆盖
-        "enable_pinn_adaptive": False,             # PINN 第二阶段随机加密
+        "enable_pinn_adaptive": True,             # PINN 第二阶段随机加密
         "enable_data_injection": False             # 数据注入开关（需自行调用）
     }
 }

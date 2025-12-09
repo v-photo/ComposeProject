@@ -70,7 +70,11 @@ def _write_comparison_markdown(
         f.write("\n> 说明：耗时统计覆盖模型初始化后的主要训练过程；训练点数为实际使用的物理/数据点数（不含 collocation 随机点）。\n")
 
 
-def run_adaptive_experiment(config: Dict[str, Any]):
+def run_adaptive_experiment(
+    config: Dict[str, Any],
+    return_payload: bool = False,
+    return_predictions: bool = False,
+):
     """
     复刻 V1 的自适应循环：PINN 训练 -> 数据注入 -> Kriging 残差侦察 + 自适应采样 -> 循环。
     结束后用自适应实际训练点训练基线 PINN，对比并输出图。
@@ -375,6 +379,28 @@ def run_adaptive_experiment(config: Dict[str, Any]):
     )
 
     print(f"\n🎉 实验完成。结果已保存至 {results_dir}")
+
+    if return_payload:
+        result_payload = {
+            "adaptive_summary": adaptive_summary,
+            "baseline_summary": baseline_summary,
+            "events": important_events,
+            "time_seconds": adaptive_time,
+        }
+        try:
+            result_payload["pinn"] = pinn
+            result_payload["train_points"] = pinn.data.bcs[0].points
+            result_payload["train_values"] = np.exp(pinn.data.bcs[0].values.cpu().numpy())
+        except Exception:
+            pass
+        if return_predictions:
+            try:
+                preds = pinn.predict(prediction_points)
+                result_payload["predictions"] = preds
+                result_payload["prediction_points"] = prediction_points
+            except Exception as exc:
+                print(f"WARNING: 生成预测失败: {exc}")
+        return result_payload
 
 
 def _plot_v1_style(

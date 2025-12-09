@@ -83,10 +83,13 @@ def plot_true_vs_pred(
     sample_size=5000,
     use_log_norm=True,
     clip_percentiles=(1, 99),
+    train_points=None,
+    train_marker_size=24,
 ):
     """
     绘制真实 vs 预测三维散点图（随机下采样），并标注 MRE。
     支持对颜色做分位裁剪和对数归一，缓解低值占多数导致的对比不足。
+    若提供 train_points，则在两幅图上用更大的标记叠加显示训练点位置。
     """
     n = len(points)
     if n == 0:
@@ -112,6 +115,18 @@ def plot_true_vs_pred(
 
     ax1 = fig.add_subplot(1, 2, 1, projection="3d")
     sc1 = ax1.scatter(pts[:, 0], pts[:, 1], pts[:, 2], c=tvals, cmap="viridis", norm=norm, s=6)
+    if train_points is not None and len(train_points) > 0:
+        ax1.scatter(
+            train_points[:, 0],
+            train_points[:, 1],
+            train_points[:, 2],
+            c="red",
+            s=train_marker_size,
+            marker="o",
+            edgecolors="k",
+            alpha=0.9,
+            label="训练点",
+        )
     ax1.set_title("真实剂量")
     ax1.set_xlabel("X")
     ax1.set_ylabel("Y")
@@ -120,6 +135,18 @@ def plot_true_vs_pred(
 
     ax2 = fig.add_subplot(1, 2, 2, projection="3d")
     sc2 = ax2.scatter(pts[:, 0], pts[:, 1], pts[:, 2], c=pvals, cmap="viridis", norm=norm, s=6)
+    if train_points is not None and len(train_points) > 0:
+        ax2.scatter(
+            train_points[:, 0],
+            train_points[:, 1],
+            train_points[:, 2],
+            c="red",
+            s=train_marker_size,
+            marker="o",
+            edgecolors="k",
+            alpha=0.9,
+            label="训练点",
+        )
     ax2.set_title("预测剂量")
     ax2.set_xlabel("X")
     ax2.set_ylabel("Y")
@@ -194,6 +221,7 @@ def run(preset: str):
         save_path=fig_path,
         title=f"Auto 方法 ({method_used}) 真实 vs 预测",
         mre_value=mre_value,
+        train_points=train_points,
     )
 
     # 7. 保存指标

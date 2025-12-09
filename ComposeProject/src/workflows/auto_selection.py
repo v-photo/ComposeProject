@@ -9,12 +9,30 @@ from typing import Dict, Any, Optional
 # 从 scikit-learn 导入依赖
 from sklearn.neighbors import NearestNeighbors
 
-# 从我们重构后的模块中导入适配器和模型
+# 从我们重构后的模块中导入适配器
 from ..models.kriging_adapter import KrigingAdapter
-from ..models.pinn_adapter import AdvancedPINNAdapter, LegacyPINNAdapter  # 保留导入以兼容旧用法
-from ..models.pinn import PINNModel
+from .adaptive_experiment import run_adaptive_experiment
 
 EPSILON = 1e-30
+
+def _compute_coverage_ratio(points: np.ndarray, dose_data: Dict) -> float:
+    """
+    计算采样点覆盖度：采样点包围盒体积 / 整个域体积。
+    用于避免点云只集中在局部但距离均匀导致 CV 偏低的误判。
+    """
+    if len(points) == 0:
+        return 0.0
+    domain_min = dose_data.get("world_min")
+    domain_max = dose_data.get("world_max")
+    if domain_min is None or domain_max is None:
+        return 0.0
+    domain_span = np.maximum(domain_max - domain_min, EPSILON)
+    bbox_min = points.min(axis=0)
+    bbox_max = points.max(axis=0)
+    bbox_span = np.maximum(bbox_max - bbox_min, EPSILON)
+    bbox_vol = float(np.prod(bbox_span))
+    domain_vol = float(np.prod(domain_span))
+    return min(1.0, bbox_vol / domain_vol)
 
 class AutoSelectionWorkflow:
     """
@@ -39,6 +57,14 @@ class AutoSelectionWorkflow:
         """
         print("\n--- 正在分析数据分布 ---")
         
+        # 先检查覆盖度，避免点只集中在局部却距离均匀导致的误判
+        coverage_threshold = self.config.get("selection", {}).get("coverage_ratio_threshold", 0.3)
+        coverage = _compute_coverage_ratio(points, dose_data)
+        print(f"  - 覆盖度: {coverage:.3f} (阈值: {coverage_threshold})")
+        if coverage < coverage_threshold:
+            print("  - 决策: 覆盖不足，推荐使用 PINN（Kriging 外推风险高）。")
+            return "pinn"
+
         if len(points) < self.config.get('selection', {}).get('min_points_for_kriging', 100):
             print(f"  - 决策: 数据点不足 ({len(points)})。推荐使用 PINN。")
             return 'pinn'
@@ -99,65 +125,23 @@ class AutoSelectionWorkflow:
 
         elif method_to_use == 'pinn':
             print("\n--- 正在执行自适应 PINN 工作流 (auto 判定) ---")
-            pinn_config = self.config.get('pinn', {})
-            system_cfg = self.config.get('system', {})
-            training_params = pinn_config.get('training_params', {})
-            enable_pinn_adaptive = system_cfg.get('enable_pinn_adaptive', True)  # auto 下默认开启
-
-            # 准备训练/测试数据
-            true_field_values = dose_data['dose_grid'].flatten()
-            dummy_test_data = np.hstack([prediction_points, true_field_values[:len(prediction_points)].reshape(-1, 1)])
-            pinn_training_data = np.hstack([train_points, train_values.reshape(-1, 1)])
-
-            model = PINNModel(
-                dose_data=dose_data,
-                training_data=pinn_training_data,
-                test_data=dummy_test_data,
-                **pinn_config.get('model_params', {})
+            adaptive_results = run_adaptive_experiment(
+                self.config,
+                return_payload=True,
+                return_predictions=True,
             )
-
-            model_params = pinn_config.get('model_params', {})
-            num_collocation = model_params.get('num_collocation_points', 4096)
-            base_epochs = training_params.get('cycle_epochs', training_params.get('total_epochs', 5000))
-
-            print(f"INFO: Generating {num_collocation} collocation points for training cycle...")
-            collocation_points = np.random.uniform(
-                low=dose_data['world_min'],
-                high=dose_data['world_max'],
-                size=(num_collocation, 3)
-            )
-
-            cycle1 = model.run_training_cycle(
-                max_epochs=base_epochs,
-                detect_every=training_params.get('detect_every', 500),
-                detection_threshold=training_params.get('detection_threshold', 0.1),
-                collocation_points=collocation_points,
-                checkpoint_path_prefix=self.config.get('system', {}).get('checkpoint_path', './models/pinn_checkpoint'),
-                enable_early_stop=self.config.get("adaptive_experiment", {}).get("enable_rapid_improvement_early_stop", True),
-            )
-
-            if enable_pinn_adaptive:
-                print("INFO: [Auto-PINN] 自适应加密已开启，生成新一轮随机 collocation 点...")
-                new_collocation = np.random.uniform(
-                    low=dose_data['world_min'],
-                    high=dose_data['world_max'],
-                    size=(num_collocation, 3)
-                )
-                adaptive_epochs = training_params.get('adaptive_cycle_epochs', 2000)
-                model.run_training_cycle(
-                    max_epochs=adaptive_epochs,
-                    detect_every=training_params.get('detect_every', 500),
-                    detection_threshold=training_params.get('detection_threshold', 0.1),
-                    collocation_points=new_collocation,
-                    checkpoint_path_prefix=self.config.get('system', {}).get('checkpoint_path', './models/pinn_checkpoint'),
-                    enable_early_stop=self.config.get("adaptive_experiment", {}).get("enable_rapid_improvement_early_stop", True),
-                )
-            else:
-                print("INFO: [Auto-PINN] 自适应加密已关闭。")
-
-            predictions = model.predict(prediction_points)
+            predictions = None
+            if adaptive_results:
+                predictions = adaptive_results.get("predictions")
+                results["adapter"] = adaptive_results.get("pinn")
+                results["train_points"] = adaptive_results.get("train_points")
+                results["train_values"] = adaptive_results.get("train_values")
+                results["events"] = adaptive_results.get("events")
+                results["adaptive_summary"] = adaptive_results.get("adaptive_summary")
+                results["baseline_summary"] = adaptive_results.get("baseline_summary")
+                results["time_seconds"] = adaptive_results.get("time_seconds")
             results['predictions'] = predictions
-            results['adapter'] = model
+            results['method_used'] = 'pinn_adaptive'
 
         end_time = time.time()
         results['total_time'] = end_time - start_time
