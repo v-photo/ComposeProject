@@ -12,6 +12,7 @@ from src.data.loader import AdaptiveDataLoader
 from src.models.pinn import PINNModel
 from src.training.samplers import GpuKrigingSurrogate, AdaptiveSampler
 from src.utils.environment import validate_compose_environment
+from src.analysis.plotting import plot_training_comparison
 
 
 def _compute_exploration_ratio(cycle_number: int, initial: float, final: float, decay: float) -> float:
@@ -33,7 +34,7 @@ def _write_comparison_markdown(
     adaptive_stats: Dict[str, Any],
     baseline_stats: Dict[str, Any],
 ):
-    """将耗时与精度的对比结果落盘为 Markdown。"""
+    """将耗时与精度的对比结果落盘为 Markdown，并记录实际训练点数。"""
     md_path.parent.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -46,12 +47,14 @@ def _write_comparison_markdown(
         f.write(f"# PINN 对比汇总（{exp_name}）\n\n")
         f.write(f"- 生成时间：{timestamp}\n")
         f.write(f"- 配置后缀：{suffix}\n\n")
-        f.write("| 模型 | 最终MRE | 最佳MRE | 训练轮数 | 耗时(秒) | 耗时(分钟) |\n")
-        f.write("| --- | --- | --- | --- | --- | --- |\n")
+        f.write("| 模型 | 训练点数 | 最终MRE | 最佳MRE | 训练轮数 | 耗时(秒) | 耗时(分钟) |\n")
+        f.write("| --- | --- | --- | --- | --- | --- | --- |\n")
         for name, stats in rows:
             if not stats:
-                final_mre = best_mre = epochs = time_sec = time_min = "N/A"
+                train_points = final_mre = best_mre = epochs = time_sec = time_min = "N/A"
             else:
+                train_points_val = stats.get("train_points")
+                train_points = train_points_val if train_points_val is not None else "N/A"
                 final_mre = _format_float(stats.get("final_mre"), 6)
                 best_mre = _format_float(stats.get("best_mre"), 6)
                 epochs_val = stats.get("epochs")
@@ -62,9 +65,9 @@ def _write_comparison_markdown(
                     time_sec_val / 60 if isinstance(time_sec_val, (int, float)) else None,
                     2,
                 )
-            f.write(f"| {name} | {final_mre} | {best_mre} | {epochs} | {time_sec} | {time_min} |\n")
+            f.write(f"| {name} | {train_points} | {final_mre} | {best_mre} | {epochs} | {time_sec} | {time_min} |\n")
 
-        f.write("\n> 说明：耗时统计覆盖模型初始化后的主要训练过程。\n")
+        f.write("\n> 说明：耗时统计覆盖模型初始化后的主要训练过程；训练点数为实际使用的物理/数据点数（不含 collocation 随机点）。\n")
 
 
 def run_adaptive_experiment(config: Dict[str, Any]):
@@ -181,19 +184,28 @@ def run_adaptive_experiment(config: Dict[str, Any]):
             detection_threshold=training_params.get("detection_threshold", 0.1),
             collocation_points=current_collocation_points,
             checkpoint_path_prefix=system_cfg.get("checkpoint_path", "./models/pinn_checkpoint"),
+            enable_early_stop=enable_ries,
         )
         epochs_after = pinn.model.train_state.step or 0
         epochs_this_cycle = epochs_after - epochs_before
         total_epochs_trained += epochs_this_cycle
         cycle_counter += 1
 
-        # 记录阶段事件 + 周期内早停/回退事件
-        if pinn.epoch_history:
-            important_events.append((pinn.epoch_history[-1], "phase_transition", f"周期{cycle_counter}完成"))
+        # 周期内早停/回退事件
         if cycle_result and cycle_result.get("events"):
             for e_step, e_type in cycle_result["events"]:
                 desc = "早停" if e_type == "early_stop" else "回退" if e_type == "rollback" else "训练事件"
                 important_events.append((e_step, e_type, desc))
+        # 在周期结束位置标注回退（使用最佳模型所在 step，如果有）
+        rollback_step = cycle_result.get("rollback_step")
+        cycle_end_step = cycle_result.get("cycle_end_step", pinn.model.train_state.step or epochs_after)
+        if rollback_step is not None:
+            best_mre = cycle_result.get("best_mre")
+            if best_mre is not None:
+                desc = f"回退best@{rollback_step}, MRE={best_mre:.3f}"
+            else:
+                desc = f"回退best@{rollback_step}"
+            important_events.append((cycle_end_step, "rollback", desc))
 
         # 记录训练曲线
         history_epochs = pinn.epoch_history
@@ -252,6 +264,8 @@ def run_adaptive_experiment(config: Dict[str, Any]):
         "best_mre": float(np.min(history_mre)) if history_mre else None,
         "epochs": total_epochs_trained,
         "time_seconds": adaptive_time,
+        # 实际训练点数（自适应过程中累积使用的物理/数据点数，不含 collocation）
+        "train_points": int(pinn.data.bcs[0].points.shape[0]) if getattr(pinn, "data", None) and pinn.data.bcs else None,
     }
 
     # 基线对比
@@ -296,6 +310,8 @@ def run_adaptive_experiment(config: Dict[str, Any]):
             "best_mre": float(np.min(baseline.mre_history)) if baseline.mre_history else None,
             "epochs": baseline.model.train_state.step or 0,
             "time_seconds": baseline_time,
+            # 训练点数（基于自适应阶段实际使用的训练点）
+            "train_points": int(baseline.data.bcs[0].points.shape[0]) if getattr(baseline, "data", None) and baseline.data.bcs else None,
         }
         print(f"--- ✅ 基线 PINN 训练完成，耗时 {baseline_time/60:.2f} 分 ---")
 
@@ -350,11 +366,12 @@ def run_adaptive_experiment(config: Dict[str, Any]):
         baseline_stats=baseline_summary,
     )
 
-    np.savez(
-        results_dir / f"training_history_{exp_name}.npz",
-        epochs=np.array(history_epochs),
-        metrics=np.array(history_mre),
-        events=np.array(events, dtype=object),
+    # 额外生成训练历史对比图（自适应/基线）
+    plot_training_comparison(
+        models_history=history,
+        important_events=events,
+        title=f"Adaptive vs Baseline ({suffix})",
+        save_path=results_dir / f"training_history_{exp_name}_{suffix}.png",
     )
 
     print(f"\n🎉 实验完成。结果已保存至 {results_dir}")

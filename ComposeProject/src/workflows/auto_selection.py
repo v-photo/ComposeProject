@@ -11,7 +11,7 @@ from sklearn.neighbors import NearestNeighbors
 
 # 从我们重构后的模块中导入适配器和模型
 from ..models.kriging_adapter import KrigingAdapter
-from ..models.pinn_adapter import AdvancedPINNAdapter, LegacyPINNAdapter
+from ..models.pinn_adapter import AdvancedPINNAdapter, LegacyPINNAdapter  # 保留导入以兼容旧用法
 from ..models.pinn import PINNModel
 
 EPSILON = 1e-30
@@ -98,46 +98,66 @@ class AutoSelectionWorkflow:
             results['adapter'] = kriging_adapter
 
         elif method_to_use == 'pinn':
-            print("\n--- 正在执行高级 PINN 工作流 ---")
-            
-            # 2. 初始化核心 PINNModel
+            print("\n--- 正在执行自适应 PINN 工作流 (auto 判定) ---")
             pinn_config = self.config.get('pinn', {})
-            training_data = np.hstack([train_points, train_values.reshape(-1, 1)])
-            
-            # 如果没有提供测试数据，使用训练数据的一部分
-            if test_data is None:
-                from sklearn.model_selection import train_test_split
-                _, test_data = train_test_split(training_data, test_size=0.2, random_state=42)
-            
-            pinn_model_instance = PINNModel(
+            system_cfg = self.config.get('system', {})
+            training_params = pinn_config.get('training_params', {})
+            enable_pinn_adaptive = system_cfg.get('enable_pinn_adaptive', True)  # auto 下默认开启
+
+            # 准备训练/测试数据
+            true_field_values = dose_data['dose_grid'].flatten()
+            dummy_test_data = np.hstack([prediction_points, true_field_values[:len(prediction_points)].reshape(-1, 1)])
+            pinn_training_data = np.hstack([train_points, train_values.reshape(-1, 1)])
+
+            model = PINNModel(
                 dose_data=dose_data,
-                training_data=training_data,
-                test_data=test_data,
+                training_data=pinn_training_data,
+                test_data=dummy_test_data,
                 **pinn_config.get('model_params', {})
             )
 
-            # 3. 使用高级适配器来控制模型
-            pinn_adapter = AdvancedPINNAdapter(pinn_model_instance)
-            
-            # 4. 生成配置点并执行训练周期
             model_params = pinn_config.get('model_params', {})
-            num_collocation = model_params.get('num_collocation_points', 1024)
-            world_min = dose_data['world_min']
-            world_max = dose_data['world_max']
-            collocation_points = np.random.rand(num_collocation, 3) * (world_max - world_min) + world_min
-            
-            training_params = pinn_config.get('training_params', {})
-            pinn_adapter.train_cycle(
-                max_epochs=training_params.get('total_epochs', 5000),
-                detect_every=training_params.get('detect_every', 500),
-                checkpoint_path_prefix=self.config.get('system', {}).get('checkpoint_path', './models/pinn_checkpoint'),
-                collocation_points=collocation_points
+            num_collocation = model_params.get('num_collocation_points', 4096)
+            base_epochs = training_params.get('cycle_epochs', training_params.get('total_epochs', 5000))
+
+            print(f"INFO: Generating {num_collocation} collocation points for training cycle...")
+            collocation_points = np.random.uniform(
+                low=dose_data['world_min'],
+                high=dose_data['world_max'],
+                size=(num_collocation, 3)
             )
-            
-            # 5. 获取预测结果
-            predictions = pinn_adapter.predict(prediction_points)
+
+            cycle1 = model.run_training_cycle(
+                max_epochs=base_epochs,
+                detect_every=training_params.get('detect_every', 500),
+                detection_threshold=training_params.get('detection_threshold', 0.1),
+                collocation_points=collocation_points,
+                checkpoint_path_prefix=self.config.get('system', {}).get('checkpoint_path', './models/pinn_checkpoint'),
+                enable_early_stop=self.config.get("adaptive_experiment", {}).get("enable_rapid_improvement_early_stop", True),
+            )
+
+            if enable_pinn_adaptive:
+                print("INFO: [Auto-PINN] 自适应加密已开启，生成新一轮随机 collocation 点...")
+                new_collocation = np.random.uniform(
+                    low=dose_data['world_min'],
+                    high=dose_data['world_max'],
+                    size=(num_collocation, 3)
+                )
+                adaptive_epochs = training_params.get('adaptive_cycle_epochs', 2000)
+                model.run_training_cycle(
+                    max_epochs=adaptive_epochs,
+                    detect_every=training_params.get('detect_every', 500),
+                    detection_threshold=training_params.get('detection_threshold', 0.1),
+                    collocation_points=new_collocation,
+                    checkpoint_path_prefix=self.config.get('system', {}).get('checkpoint_path', './models/pinn_checkpoint'),
+                    enable_early_stop=self.config.get("adaptive_experiment", {}).get("enable_rapid_improvement_early_stop", True),
+                )
+            else:
+                print("INFO: [Auto-PINN] 自适应加密已关闭。")
+
+            predictions = model.predict(prediction_points)
             results['predictions'] = predictions
-            results['adapter'] = pinn_adapter
+            results['adapter'] = model
 
         end_time = time.time()
         results['total_time'] = end_time - start_time

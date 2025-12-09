@@ -11,12 +11,14 @@ class EarlyCycleStopper(dde.callbacks.Callback):
     一个自定义回调，用于在训练周期内实现基于性能的"早停"。
     同时自己负责保存周期内的最佳模型。
     """
-    def __init__(self, detection_threshold: float, display_every: int, checkpoint_path_prefix: str):
+    def __init__(self, detection_threshold: float, display_every: int, checkpoint_path_prefix: str, enable_early_stop: bool = True):
         super().__init__()
         self.threshold = detection_threshold
         self.display_every = display_every
         self.checkpoint_path_prefix = checkpoint_path_prefix
+        self.enable_early_stop = enable_early_stop
         self.best_mre = np.inf
+        self.best_step = None
         self.should_stop = False
         self.best_model_path = "" # 将存储最佳模型的完整真实路径
         self.events = []  # 记录早停/回退事件 (epoch, type)
@@ -32,6 +34,7 @@ class EarlyCycleStopper(dde.callbacks.Callback):
         
         self.best_mre = initial_mre
         self.best_model_path = initial_model_path
+        self.best_step = None
         self.should_stop = False
         self.events = []
 
@@ -44,9 +47,9 @@ class EarlyCycleStopper(dde.callbacks.Callback):
 
             latest_mre = self.model.train_state.metrics_test[-1]
             
-            # 检查是否有显著的性能提升
+            # 检查是否有显著的性能提升（可配置关闭）
             # 仅在 self.best_mre 不是无穷大（即至少有一个基准）时检查
-            if self.best_mre != np.inf:
+            if self.enable_early_stop and self.best_mre != np.inf:
                 improvement = self.best_mre - latest_mre
                 required_improvement_amount = self.best_mre * self.threshold
                 
@@ -75,3 +78,16 @@ class EarlyCycleStopper(dde.callbacks.Callback):
                 # 更新 best_model_path 以便下次可以清理
                 current_step = self.model.train_state.step
                 self.best_model_path = f"{self.checkpoint_path_prefix}-{current_step}.pt"
+                self.best_step = current_step
+
+                # 将“最佳”对齐到 MRE，覆盖 DeepXDE 默认的基于 loss 的 best_*，避免日志混淆
+                ts = self.model.train_state
+                if ts is not None:
+                    ts.best_step = current_step
+                    # 覆盖 best_metrics 为当前 MRE（单指标）
+                    ts.best_metrics = [latest_mre]
+                    # 覆盖 best_loss / best_train_loss 以便日志一致（避免对多元素数组做布尔判断）
+                    if getattr(ts, "loss_test", None) is not None and len(ts.loss_test) > 0:
+                        ts.best_loss = ts.loss_test[-1]
+                    if getattr(ts, "loss_train", None) is not None and len(ts.loss_train) > 0:
+                        ts.best_loss_train = ts.loss_train[-1]

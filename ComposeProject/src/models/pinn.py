@@ -156,7 +156,8 @@ class PINNModel:
                            detect_every: int,
                            collocation_points: np.ndarray,
                            checkpoint_path_prefix: str,
-                           detection_threshold: float = 0.1) -> Dict[str, Any]:
+                           detection_threshold: float = 0.1,
+                           enable_early_stop: bool = True) -> Dict[str, Any]:
         """
         执行一个带有动态停止条件的训练周期。
         """
@@ -174,7 +175,8 @@ class PINNModel:
         stopper = EarlyCycleStopper(
             detection_threshold=detection_threshold,
             display_every=5,  # 与 V1 保持一致，提升检测频率
-            checkpoint_path_prefix=checkpoint_path_prefix
+            checkpoint_path_prefix=checkpoint_path_prefix,
+            enable_early_stop=enable_early_stop
         )
         
         initial_mre = self.mean_relative_error_metric(None, None)
@@ -190,8 +192,6 @@ class PINNModel:
 
         # 分段训练以便在 detect_every 间隔内检查停滞/快速改善
         remaining_epochs = max_epochs
-        stagnation_detected = False
-        rollback_event = None
         losshistory = None
         train_state = None
 
@@ -203,33 +203,20 @@ class PINNModel:
                 display_every=5  # 与 V1 保持一致
             )
 
-            should_exit_cycle = False
-
-            # 停滞检测：当前MRE变差则回退到最佳并提前结束本周期
-            if stopper.best_model_path and os.path.exists(stopper.best_model_path):
-                latest_mre = self.model.train_state.metrics_test[-1] if self.model.train_state.metrics_test else None
-                if latest_mre is not None and latest_mre > stopper.best_mre:
-                    print(f"    ⚠️ Stagnation detected: MRE increased to {latest_mre:.6f} (best {stopper.best_mre:.6f}).")
-                    stagnation_detected = True
-                    self.model.restore(stopper.best_model_path, verbose=0)
-                    rollback_event = (self.model.train_state.step or 0, 'rollback')
-                    should_exit_cycle = True
-
+            remaining_epochs -= epochs_to_run
             # 快速改善早停：回调标记 should_stop 时提前结束本周期
             if stopper.should_stop:
-                should_exit_cycle = True
-
-            if should_exit_cycle:
                 break
-
-            remaining_epochs -= epochs_to_run
         
-        # 恢复周期内找到的最佳模型并清理临时文件
+        # 周期结束后再回退到最佳模型（不在中途回退）
+        rollback_event = None
+        cycle_end_step = epochs_before_cycle + (max_epochs - remaining_epochs)
         if stopper.best_model_path and os.path.exists(stopper.best_model_path):
             print(f"INFO: Restoring best model from cycle: {stopper.best_model_path}")
             self.model.restore(stopper.best_model_path, verbose=1)
-            if rollback_event is None:
-                rollback_event = (self.model.train_state.step or 0, 'rollback')
+            # 使用记录的最佳 step，若缺省则退回当前 step
+            best_step = stopper.best_step if hasattr(stopper, "best_step") else None
+            rollback_event = (best_step if best_step is not None else (self.model.train_state.step or 0), 'rollback')
             try:
                 os.remove(stopper.best_model_path)
             except OSError as e:
@@ -240,16 +227,16 @@ class PINNModel:
         print(f"INFO: (PINNModel) Cycle finished. Final MRE: {final_mre:.6f}")
         
         events = stopper.events.copy()
-        if rollback_event:
-            events.append(rollback_event)
         
         return {
-            "stagnation_detected": stagnation_detected,
+            "stagnation_detected": False,
             "losshistory": losshistory,
             "train_state": train_state,
             "best_mre": stopper.best_mre,
             "final_mre": final_mre,
-            "events": events
+            "events": events,
+            "rollback_step": rollback_event[0] if rollback_event else None,
+            "cycle_end_step": cycle_end_step
         }
 
     def predict(self, points: np.ndarray) -> np.ndarray:

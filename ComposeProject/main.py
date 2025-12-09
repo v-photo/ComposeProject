@@ -35,7 +35,6 @@ from src.data.loader import (
 from src.models.pinn import PINNModel
 from src.models.kriging_adapter import KrigingAdapter
 from src.workflows.auto_selection import AutoSelectionWorkflow
-from src.training.samplers import GpuKrigingSurrogate, AdaptiveSampler
 from src.analysis.plotting import plot_training_comparison
 from src.utils.display import print_compose_banner
 from src.utils.environment import validate_compose_environment
@@ -99,8 +98,8 @@ def main():
     parser = argparse.ArgumentParser(description="模块化的PINN耦合系统")
     parser.add_argument('--preset', type=str, default='default', 
                        help='指定要使用的config.py中的预设配置')
-    parser.add_argument('--method', type=str, choices=['auto', 'kriging', 'pinn', 'compose', 'adaptive_experiment'], default=None,
-                       help='选择预测方法: auto | kriging | pinn | compose（CLI优先，其次配置，默认auto）')
+    parser.add_argument('--method', type=str, choices=['auto', 'kriging', 'pinn', 'adaptive_experiment'], default=None,
+                       help='选择预测方法: auto | kriging | pinn | adaptive_experiment（CLI优先，其次配置，默认auto）')
     parser.add_argument('--verbose', action='store_true',
                        help='打印详细的配置信息')
     args = parser.parse_args()
@@ -189,106 +188,6 @@ def main():
         adapter = kriging_adapter
         total_time = time.time() - start_time
 
-    elif method == 'compose':
-        print("\n--- 🔀 正在执行 Compose（PINN + GPU-Kriging 引导）工作流 ---")
-        pinn_config = config.get('pinn', {})
-        kriging_cfg = config.get('kriging', {})
-        system_cfg = config.get('system', {})
-        enable_adaptive = system_cfg.get('enable_compose_adaptive', False)
-        compose_events = []
-
-        true_field_values = dose_data['dose_grid'].flatten()
-        dummy_test_data = np.hstack([prediction_points, true_field_values[:len(prediction_points)].reshape(-1, 1)])
-        pinn_training_data = np.hstack([train_points, train_values])
-
-        model = PINNModel(
-            dose_data=dose_data,
-            training_data=pinn_training_data,
-            test_data=dummy_test_data, 
-            **pinn_config.get('model_params', {})
-        )
-
-        training_params = pinn_config.get('training_params', {})
-        model_params = pinn_config.get('model_params', {})
-        num_collocation = model_params.get('num_collocation_points', 4096)
-        base_epochs = training_params.get('cycle_epochs', training_params.get('total_epochs', 5000))
-        base_epochs = training_params.get('cycle_epochs', training_params.get('total_epochs', 5000))
-
-        # 初始 PINN 训练周期
-        print(f"INFO: [Compose] 首轮生成 {num_collocation} 个 collocation 点并训练...")
-        collocation_points = np.random.uniform(
-            low=dose_data['world_min'],
-            high=dose_data['world_max'],
-            size=(num_collocation, 3)
-        )
-        model.run_training_cycle(
-            max_epochs=base_epochs,
-            detect_every=training_params.get('detect_every', 500),
-            detection_threshold=training_params.get('detection_threshold', 0.1),
-            collocation_points=collocation_points,
-            checkpoint_path_prefix=config.get('system', {}).get('checkpoint_path', './models/pinn_checkpoint')
-        )
-        if getattr(model, 'epoch_history', None):
-            compose_events.append((model.epoch_history[-1], 'phase_transition', '首轮PINN完成'))
-
-        if enable_adaptive:
-            # 残差侦察 + GPU-Kriging 代理
-            scout_points_num = training_params.get('scout_points', 8000)
-            print(f"INFO: [Compose] 采样 {scout_points_num} 个侦察点计算 PDE 残差...")
-            scout_points = np.random.uniform(
-                low=dose_data['world_min'],
-                high=dose_data['world_max'],
-                size=(scout_points_num, 3)
-            )
-            true_residuals = model.compute_pde_residual(scout_points)
-
-            surrogate = GpuKrigingSurrogate(
-                variogram_model=kriging_cfg.get('variogram_model', 'exponential'),
-                nlags=kriging_cfg.get('nlags', 8),
-                block_size=kriging_cfg.get('block_size', 10000)
-            )
-            surrogate.fit(scout_points, true_residuals)
-
-            # 自适应采样生成新配点
-            total_candidates = kriging_cfg.get('total_candidates', 50000)
-            exploration_ratio = kriging_cfg.get('exploration_ratio', 0.2)
-            sampler = AdaptiveSampler(
-                domain_bounds=np.vstack([dose_data['world_min'], dose_data['world_max']]),
-                total_candidates=total_candidates
-            )
-            print(f"INFO: [Compose] 使用 Kriging 残差代理生成新的 collocation 点 (exploration_ratio={exploration_ratio:.2f}) ...")
-            new_collocation = sampler.generate_new_collocation_points(
-                surrogate_model=surrogate,
-                num_points_to_sample=num_collocation,
-                exploration_ratio=exploration_ratio
-            )
-
-            # 第二轮 PINN 训练（自适应加密）
-            adaptive_epochs = training_params.get('adaptive_cycle_epochs', 2000)
-            print(f"INFO: [Compose] 自适应训练周期，epochs={adaptive_epochs} ...")
-            cycle2 = model.run_training_cycle(
-                max_epochs=adaptive_epochs,
-                detect_every=training_params.get('detect_every', 500),
-                detection_threshold=training_params.get('detection_threshold', 0.1),
-                collocation_points=new_collocation,
-                checkpoint_path_prefix=config.get('system', {}).get('checkpoint_path', './models/pinn_checkpoint')
-            )
-            if getattr(model, 'epoch_history', None):
-                compose_events.append((model.epoch_history[-1], 'kriging_resampling', '残差引导配点完成'))
-            for e_step, e_type in cycle2.get('events', []):
-                desc = '早停' if e_type == 'early_stop' else '回退到最佳检查点' if e_type == 'rollback' else '训练事件'
-                compose_events.append((e_step, 'early_stop' if e_type == 'early_stop' else 'rollback', desc))
-        else:
-            print("INFO: [Compose] 自适应残差引导已关闭（enable_compose_adaptive=False），跳过 Kriging 引导步骤。")
-
-        predictions = model.predict(prediction_points)
-        adapter = model
-        total_time = time.time() - start_time
-
-        if hasattr(model, 'mre_history') and getattr(model, 'epoch_history', None):
-            history = {'Compose-PINN': {'epochs': model.epoch_history, 'metrics': model.mre_history, 'events': compose_events}}
-        method_used = 'compose'
-
     else:  # method == 'pinn'
         print("\n--- 🚀 正在执行 PINN 工作流 ---")
         pinn_config = config.get('pinn', {})
@@ -311,6 +210,7 @@ def main():
         training_params = pinn_config.get('training_params', {})
         model_params = pinn_config.get('model_params', {})
         num_collocation = model_params.get('num_collocation_points', 4096)
+        base_epochs = training_params.get('cycle_epochs', training_params.get('total_epochs', 5000))
         
         print(f"INFO: Generating {num_collocation} collocation points for training cycle...")
         collocation_points = np.random.uniform(

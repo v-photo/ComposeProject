@@ -66,7 +66,7 @@ def plot_training_comparison(
         labels.extend([text.get_text() for text in event_legend_handles.texts])
         event_legend_handles.remove()
 
-    ax.legend(handles, labels, fontsize=12, loc='upper right')
+    ax.legend(handles, labels, fontsize=12, loc='lower left')
 
     plt.tight_layout()
     
@@ -92,9 +92,13 @@ def _plot_smart_annotations(ax: plt.Axes, events: List[Tuple[int, str, str]]):
         
         y_min, y_max = y_range
         positions = []
-        
+
+        # 在 log 区间内均匀取若干高度，避免全部落在同一条线上
         log_min, log_max = np.log10(max(y_min, 1e-10)), np.log10(max(y_max, 1e-9))
-        y_levels = np.logspace(log_max * 0.98, log_max * 0.6, 8)
+        span = max(log_max - log_min, 1e-6)
+        start_exp = log_max - 0.1 * span      # 接近顶部但预留空间
+        end_exp = log_max - 0.6 * span        # 向下分布避免重叠
+        y_levels = np.logspace(start_exp, end_exp, 8)
 
         x_range = sorted_events[-1][0] - sorted_events[0][0] if len(sorted_events) > 1 else 1
         min_distance = max(200, x_range * 0.05)
@@ -116,7 +120,7 @@ def _plot_smart_annotations(ax: plt.Axes, events: List[Tuple[int, str, str]]):
     event_styles = {
         'data_injection': {'color': 'green', 'linestyle': '--', 'label': '数据注入'},
         'kriging_resampling': {'color': 'orange', 'linestyle': '-.', 'label': '克里金重采样'},
-        'phase_transition': {'color': 'purple', 'linestyle': ':', 'label': '阶段转换'},
+        'rollback': {'color': 'purple', 'linestyle': ':', 'label': '回退最佳模型'},
         'loss_ratio_update': {'color': 'red', 'linestyle': '-', 'label': '权重更新'}
     }
 
@@ -125,17 +129,23 @@ def _plot_smart_annotations(ax: plt.Axes, events: List[Tuple[int, str, str]]):
     annotation_positions = _get_smart_positions(sorted_events, (y_min, y_max))
 
     legend_handles = {}
+    type_counters = {}
     for i, (event_data, pos_data) in enumerate(zip(sorted_events, annotation_positions)):
         epoch, event_type, description = event_data
         y_pos = pos_data[1]
+        # 同类型事件分层偏移，减少遮挡
+        type_counters.setdefault(event_type, 0)
+        offset_factor = 1 + 0.12 * (type_counters[event_type] % 3)  # 同一类型最多轮换3层
+        type_counters[event_type] += 1
+        y_pos *= offset_factor
+
         style = event_styles.get(event_type, {'color': 'gray', 'linestyle': '-', 'label': '其他'})
 
         line = ax.axvline(x=epoch, color=style['color'], linestyle=style['linestyle'], alpha=0.7, linewidth=1.5)
         if style['label'] not in legend_handles:
             legend_handles[style['label']] = line
         
-        short_desc = description.split('(')[0].strip()[:20]
-        
+        short_desc = description.split('(')[0].strip()[:30]
         ax.annotate(f'{short_desc}\n(E{epoch})',
                     xy=(epoch, y_pos), xytext=(8, 0), textcoords='offset points',
                     ha='left', va='center', fontsize=9,
@@ -143,5 +153,6 @@ def _plot_smart_annotations(ax: plt.Axes, events: List[Tuple[int, str, str]]):
                     arrowprops=dict(arrowstyle='-', connectionstyle='arc3,rad=0.1',
                                   color=style['color'], alpha=0.6))
 
+    # 单独放置事件图例，避免与主图例重叠
     ax.legend(handles=legend_handles.values(), labels=legend_handles.keys(),
               title="重要事件", fontsize=10, loc='upper left', bbox_to_anchor=(1.02, 1))

@@ -5,6 +5,7 @@ import numpy as np
 from typing import Dict, Any
 
 # --- 默认配置 ---
+# 说明：DEFAULT_CONFIG 是所有预设的基底，预设仅按需覆盖差异字段。
 DEFAULT_CONFIG = {
     "experiment": {
         "name": "default_adaptive_pinn",
@@ -21,17 +22,17 @@ DEFAULT_CONFIG = {
             "final": 0.018,
             "decay": 0.04,
         },
-        # 开关
-        "enable_kriging": False,
+        # 开关（当前默认：同时开启 Kriging 重采样与数据注入，可在预设中覆写）
+        "enable_kriging": True,
         "enable_data_injection": True,
         "enable_rapid_improvement_early_stop": True,
         # 数据拆分
         "split_ratios": [0.7] + [0.05]*6,  # 主集 + 多储备
         "test_set_size": 30000,
         # 基线对比
-        "enable_baseline": True,
-        # 输出文件名后缀
-        "file_suffix": "full_adaptive"
+        "enable_baseline": False,
+        # 输出文件名后缀；置为 None 则自动根据开关生成（kriging_only/data_injection_only/full_adaptive/periodic_restart）
+        "file_suffix": None
     },
     "data": {
         "file_path": "../PINN/DATA.xlsx",
@@ -64,7 +65,7 @@ DEFAULT_CONFIG = {
         "model_params": {
             "network_layers": [3, 64, 64, 64, 1],   # 网络结构
             "learning_rate": 1e-3,                  # 学习率
-            "loss_ratio": 10.0,                     # 数据/物理损失权重比
+            "loss_ratio": 5,                     # 数据/物理损失权重比
             "num_collocation_points": 4096,         # 配点数量
         },
         "training_params": {
@@ -95,7 +96,7 @@ DEFAULT_CONFIG = {
     },
     "selection": {
         "min_points_for_kriging": 100,             # 自动选择时最少点数
-        "uniformity_cv_threshold": 0.6,            # 最近邻CV阈值
+        "uniformity_cv_threshold": 0.1,            # 最近邻CV阈值
     },
     "system": {
         "use_gpu": True,                           # 是否使用GPU
@@ -105,13 +106,19 @@ DEFAULT_CONFIG = {
         "checkpoint_path": "./models/pinn_checkpoint", # 检查点路径前缀
         "results_dir": "results",                  # 结果输出目录
         "method": "auto",                          # 默认方法，可被CLI覆盖
-        "enable_compose_adaptive": False,          # Compose 残差引导配点
         "enable_pinn_adaptive": False,             # PINN 第二阶段随机加密
         "enable_data_injection": False             # 数据注入开关（需自行调用）
     }
 }
 
 # --- 预设 ---
+# 用途概览：
+# default            -> 与 DEFAULT_CONFIG 相同，占位
+# quick_test         -> 小样本/大步长，几秒跑通流程
+# kriging_only       -> 强制走 Kriging（阈值极高）
+# pinn_only          -> 强制走 PINN（阈值极低）
+# random_sampling    -> 随机采样 + auto 判别，兼容旧版接口
+# adaptive_experiment_config1 -> 复刻旧版仅数据注入的自适应实验
 PRESETS = {
     "default": DEFAULT_CONFIG,
     "quick_test": {
@@ -200,26 +207,28 @@ PRESETS = {
         **DEFAULT_CONFIG,
         "experiment": {"name": "random_sampling_test"},
         "sampling": {
-            "strategy": "positive_only",
-            "kriging_style": DEFAULT_CONFIG.get("sampling", {}).get("kriging_style", {}),
-            "random_sampling": {"num_samples": 300}
+            "strategy": "positive_only",  # 强制走随机采样分支，不使用结构化网格
+            "kriging_style": DEFAULT_CONFIG.get("sampling", {}).get("kriging_style", {}),  # 保留字段避免旧代码取值报错
+            "random_sampling": {"num_samples": 300}  # 随机采样点数（正剂量区域优先）
         },
         "system": {
             **DEFAULT_CONFIG["system"],
-            "method": "auto"
+            "method": "auto"  # 仍交给自动选择，根据分布判定 Kriging 或 PINN
         }
     },
     # 对齐老版 example2.py 的仅数据注入配置（禁用 Kriging），用于复现旧版对比图
-    "data_injection_only_v1": {
+    "adaptive_experiment_config1": {
         **DEFAULT_CONFIG,
-        "experiment": {"name": "data_injection_only_v1"},
+        "experiment": {"name": "adaptive_experiment_config1"},
         "adaptive_experiment": {
             **DEFAULT_CONFIG["adaptive_experiment"],
+            # 复刻“无自适应策略”对照：关闭 Kriging 与数据注入/快速早停
             "enable_kriging": False,
             "enable_data_injection": True,
-            "enable_rapid_improvement_early_stop": True,
-            "file_suffix": "data_injection_only",
-            "total_epochs": 4000,
+            "enable_rapid_improvement_early_stop": False,
+            # 置为 None 使输出文件名/标题随实际开关自动更新
+            "file_suffix": None,
+            "total_epochs": 2000,
             "adaptive_cycle_epochs": 400,
             "detect_every": 100,
             "num_residual_scout_points": 5000,
